@@ -1,0 +1,484 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: TripWiz minimal SAM template (POC) - adjust ARNs and policies before deploy
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: nodejs24.x
+    Timeout: 10
+
+Resources:
+  TripWizTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TripWizTable
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: tripStart
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: tripStart
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ValidateLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: TripWiz-Validate
+      CodeUri: ../src/
+      Handler: validate_lambda/index.handler
+      Runtime: nodejs24.x
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TripWizTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref AlertsTopic
+        - Statement:
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Ref OpenWeatherSecret
+        - Statement:
+            Effect: Allow
+            Action:
+              - geo:SearchPlaceIndexForText
+              - geo:SearchPlaceIndexForPosition
+            Resource: !GetAtt TripWizPlaceIndex.IndexArn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TripWizTable
+          ALERTS_TOPIC_ARN: !Ref AlertsTopic
+          OPENWEATHER_SECRET_ARN: !Ref OpenWeatherSecret
+          PLACE_INDEX_NAME: !Ref TripWizPlaceIndex
+      Events:
+        NightlyTrigger:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+
+  WebSocketFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: TripWiz-WebSocketHandler
+      CodeUri: ../src/
+      Handler: ws_handler/index.handler
+      Runtime: nodejs24.x
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TripWizTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+            Resource:
+              - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TripWizTable
+          ALERTS_TOPIC_ARN: !Ref AlertsTopic
+      # WebSocket API wiring is handled by explicit ApiGatewayV2 resources below
+
+  WebSocketAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: TripWiz-WebSocketAuthorizer
+      CodeUri: ../src/
+      Handler: ws_authorizer/index.handler
+      Runtime: nodejs24.x
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - cognito-idp:GetUser
+            Resource: '*'
+
+  TripWizApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: TripWizApi
+      StageName: prod
+      Cors:
+        AllowMethods: "'OPTIONS,GET,POST,PUT,DELETE'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: TripWizCognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          TripWizCognitoAuthorizer:
+            UserPoolArn: !GetAtt TripWizUserPool.Arn
+
+  # Ensure CORS headers are present even on 4xx/5xx gateway-level errors
+  GatewayResponse4xx:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref TripWizApi
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+
+  GatewayResponse5xx:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref TripWizApi
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+
+  TripRestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: TripWiz-Trips
+      CodeUri: ../src/
+      Handler: rest_handlers/trips.handler
+      Runtime: nodejs24.x
+      Timeout: 30
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TripWizTable
+          VALIDATE_FUNCTION_NAME: !Ref ValidateLambdaFunction
+          MAPPING_SECRET_ARN: !Ref MappingApiSecret
+          USER_POOL_ID: !Ref TripWizUserPool
+          BEDROCK_MODEL_ID: us.anthropic.claude-haiku-4-5-20251001-v1:0
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TripWizTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt ValidateLambdaFunction.Arn
+        - Statement:
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Ref MappingApiSecret
+        - Statement:
+            Effect: Allow
+            Action:
+              - cognito-idp:ListUsers
+            Resource: !GetAtt TripWizUserPool.Arn
+        - Statement:
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource:
+              - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-haiku-4-5-*'
+              - !Sub 'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-*'
+              - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-*'
+      Events:
+        GetTrips:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips
+            Method: GET
+        CreateTrip:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips
+            Method: POST
+        GetTrip:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}
+            Method: GET
+        UpdateTrip:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}
+            Method: PUT
+        DeleteTrip:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}
+            Method: DELETE
+        ValidateTrip:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/validate
+            Method: POST
+        GetTripAlerts:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/alerts
+            Method: GET
+        GetTripFallbacks:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/fallbacks
+            Method: GET
+        InviteCollaborator:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/invite
+            Method: POST
+        GetCollaborators:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/collaborators
+            Method: GET
+        RemoveCollaborator:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/invite/{userId}
+            Method: DELETE
+        OptimizeRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/optimize
+            Method: POST
+        CalculateRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /routes/calculate
+            Method: POST
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: TripWizWebSocketApi
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  WebSocketIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+        - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+        - FunctionArn: !GetAtt WebSocketFunction.Arn
+
+  WebSocketAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref WebSocketApi
+      Name: TripWizWebSocketAuthorizer
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub
+        - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerArn}/invocations
+        - AuthorizerArn: !GetAtt WebSocketAuthorizerFunction.Arn
+      IdentitySource:
+        - route.request.querystring.token
+
+  WebSocketConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$connect"
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref WebSocketAuthorizer
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$disconnect"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketJoinRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "join"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketLeaveRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "leave"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketEditRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "edit"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketCursorRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "cursor"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketPingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "ping"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: prod
+      AutoDeploy: true
+
+  WebSocketInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt WebSocketFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/*"
+
+  WebSocketAuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt WebSocketAuthorizerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/authorizers/${WebSocketAuthorizer}"
+
+  TripWizPlaceIndex:
+    Type: AWS::Location::PlaceIndex
+    Properties:
+      IndexName: TripWizPlaceIndex
+      DataSource: Esri
+      Description: "Place index for finding nearby indoor fallback activities"
+      DataSourceConfiguration:
+        IntendedUse: SingleUse
+
+  OpenWeatherSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TripWiz/OpenWeatherApiKey
+      Description: "OpenWeatherMap API key for TripWiz (store value before deploy)"
+
+  MappingApiSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TripWiz/MappingApiKey
+      Description: "Mapping service API key (Amazon Location or third-party)"
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: TripWiz-Alerts
+
+  SnsToSesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: TripWiz-SnsToSes
+      CodeUri: ../src/
+      Handler: sns_to_ses/index.handler
+      Runtime: nodejs24.x
+      Environment:
+        Variables:
+          SOURCE_EMAIL: !Ref SourceEmail
+          ADMIN_EMAIL: !Ref AdminEmail
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - ses:SendEmail
+            Resource: '*'
+      Events:
+        AlertsEvent:
+          Type: SNS
+          Properties:
+            Topic: !Ref AlertsTopic
+
+  TripWizUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: TripWizUserPool
+      AutoVerifiedAttributes:
+        - email
+
+  TripWizUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: TripWizWebClient
+      UserPoolId: !Ref TripWizUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+Parameters:
+  AdminEmail:
+    Type: String
+    Description: Email address to receive TripWiz alert emails (must be verified in SES)
+  SourceEmail:
+    Type: String
+    Description: SES-verified sender email address for TripWiz alert emails (can be the same as AdminEmail)
+
+Outputs:
+  TripWizTableName:
+    Description: DynamoDB table for TripWiz
+    Value: !Ref TripWizTable
+  TripWizRestApiId:
+    Description: Serverless REST API id
+    Value: !Ref TripWizApi
+
+  TripWizRestApiUrl:
+    Description: REST API base URL (prod)
+    Value: !Sub "https://${TripWizApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  TripWizUserPoolId:
+    Description: Cognito user pool id
+    Value: !Ref TripWizUserPool
+
+  TripWizUserPoolClientId:
+    Description: Cognito user pool client id for the frontend
+    Value: !Ref TripWizUserPoolClient
+
+  AlertsTopicArn:
+    Description: SNS Topic ARN for alerts
+    Value: !Ref AlertsTopic
+  WebSocketApiId:
+    Description: WebSocket API id
+    Value: !Ref WebSocketApi
+  WebSocketEndpoint:
+    Description: WebSocket endpoint (prod)
+    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+Metadata:
+  Notes:
+    - Populate Secrets Manager values after first deploy.
+    - WebSocket clients should pass the Cognito access token as ?token=... during the connect handshake.
