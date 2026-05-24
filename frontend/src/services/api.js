@@ -35,10 +35,36 @@ export const api = {
   validateTrip: (tripId) => request('POST', `/trips/${tripId}/validate`, {}),
   getTripAlerts: (tripId) => request('GET', `/trips/${tripId}/alerts`),
   getTripFallbacks: (tripId) => request('GET', `/trips/${tripId}/fallbacks`),
+  getTripWeather: (tripId) => request('GET', `/trips/${tripId}/weather`),
   getTripCollaborators: (tripId) => request('GET', `/trips/${tripId}/collaborators`),
   inviteCollaborator: (tripId, email) => request('POST', `/trips/${tripId}/invite`, { email }),
   removeCollaborator: (tripId, userId) => request('DELETE', `/trips/${tripId}/invite/${userId}`),
   optimizeRoute: (tripId) => request('POST', `/trips/${tripId}/optimize`, {}),
-  calculateRoute: (waypoints, profile = 'driving') =>
-    request('POST', '/routes/calculate', { waypoints, profile }),
+  calculateRoute: (stops) => request('POST', '/routes/calculate', { stops }),
+  searchPlaces: (q, biasLng, biasLat) => {
+    const params = new URLSearchParams({ q });
+    if (biasLng != null) params.set('lng', biasLng);
+    if (biasLat != null) params.set('lat', biasLat);
+    return request('GET', `/places/search?${params}`);
+  },
+
+  // User preferences (synced to DynamoDB so the reminder Lambda can read them)
+  getUserPrefs:  ()      => request('GET', '/user/prefs'),
+  saveUserPrefs: (prefs) => request('PUT', '/user/prefs', prefs),
+
+  // Trending destinations (read available to any signed-in user)
+  getTrending: () => request('GET', '/trending'),
+
+  // Admin endpoints
+  getAdminMetrics:    () => request('GET', '/admin/metrics'),
+  getAdminUsers:      () => request('GET', '/admin/users'),
+  suspendUser:        (userId) => request('POST', `/admin/users/${userId}/suspend`, {}),
+  unsuspendUser:      (userId) => request('POST', `/admin/users/${userId}/unsuspend`, {}),
+  promoteUser:        (userId) => request('POST', `/admin/users/${userId}/promote`, {}),
+  demoteUser:         (userId) => request('POST', `/admin/users/${userId}/demote`, {}),
+  deleteUserAccount:  (userId) => request('DELETE', `/admin/users/${userId}`),
+  getAdminTrips:      (q) => request('GET', `/admin/trips${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  deleteAdminTrip:    (tripId) => request('DELETE', `/admin/trips/${tripId}`),
+  hideAdminTrip:      (tripId, hidden) => request('POST', `/admin/trips/${tripId}/hide`, { hidden }),
+  updateTrending:     (destinations) => request('PUT', '/admin/trending', { destinations }),
 };

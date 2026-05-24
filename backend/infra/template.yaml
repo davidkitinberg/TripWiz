@@ -57,12 +57,6 @@ Resources:
         - Statement:
             Effect: Allow
             Action:
-              - secretsmanager:GetSecretValue
-            Resource:
-              - !Ref OpenWeatherSecret
-        - Statement:
-            Effect: Allow
-            Action:
               - geo:SearchPlaceIndexForText
               - geo:SearchPlaceIndexForPosition
             Resource: !GetAtt TripWizPlaceIndex.IndexArn
@@ -70,7 +64,6 @@ Resources:
         Variables:
           TABLE_NAME: !Ref TripWizTable
           ALERTS_TOPIC_ARN: !Ref AlertsTopic
-          OPENWEATHER_SECRET_ARN: !Ref OpenWeatherSecret
           PLACE_INDEX_NAME: !Ref TripWizPlaceIndex
       Events:
         NightlyTrigger:
@@ -156,7 +149,7 @@ Resources:
       CodeUri: ../src/
       Handler: rest_handlers/trips.handler
       Runtime: nodejs24.x
-      Timeout: 30
+      Timeout: 60
       Environment:
         Variables:
           TABLE_NAME: !Ref TripWizTable
@@ -164,6 +157,10 @@ Resources:
           MAPPING_SECRET_ARN: !Ref MappingApiSecret
           USER_POOL_ID: !Ref TripWizUserPool
           BEDROCK_MODEL_ID: us.anthropic.claude-haiku-4-5-20251001-v1:0
+          PLACE_INDEX_NAME: !Ref TripWizPlaceIndex
+          ROUTE_CALCULATOR_NAME: !Ref TripWizRouteCalculator
+          WS_ENDPOINT: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+          ADMIN_EMAILS: !Ref AdminBootstrapEmails
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TripWizTable
@@ -182,6 +179,13 @@ Resources:
             Effect: Allow
             Action:
               - cognito-idp:ListUsers
+              - cognito-idp:ListUsersInGroup
+              - cognito-idp:AdminDisableUser
+              - cognito-idp:AdminEnableUser
+              - cognito-idp:AdminDeleteUser
+              - cognito-idp:AdminAddUserToGroup
+              - cognito-idp:AdminRemoveUserFromGroup
+              - cognito-idp:AdminListGroupsForUser
             Resource: !GetAtt TripWizUserPool.Arn
         - Statement:
             Effect: Allow
@@ -191,6 +195,20 @@ Resources:
               - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-haiku-4-5-*'
               - !Sub 'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-*'
               - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-*'
+        - Statement:
+            Effect: Allow
+            Action:
+              - geo:SearchPlaceIndexForText
+              - geo:CalculateRoute
+            Resource:
+              - !GetAtt TripWizPlaceIndex.IndexArn
+              - !GetAtt TripWizRouteCalculator.CalculatorArn
+        - Statement:
+            Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+            Resource:
+              - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*"
       Events:
         GetTrips:
           Type: Api
@@ -240,6 +258,12 @@ Resources:
             RestApiId: !Ref TripWizApi
             Path: /trips/{tripId}/fallbacks
             Method: GET
+        GetTripWeather:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/weather
+            Method: GET
         InviteCollaborator:
           Type: Api
           Properties:
@@ -270,6 +294,96 @@ Resources:
             RestApiId: !Ref TripWizApi
             Path: /routes/calculate
             Method: POST
+        SearchPlaces:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /places/search
+            Method: GET
+        GetTrending:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trending
+            Method: GET
+        PutTrending:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/trending
+            Method: PUT
+        AdminMetrics:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/metrics
+            Method: GET
+        AdminListUsers:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/users
+            Method: GET
+        AdminSuspendUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/users/{userId}/suspend
+            Method: POST
+        AdminUnsuspendUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/users/{userId}/unsuspend
+            Method: POST
+        AdminPromoteUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/users/{userId}/promote
+            Method: POST
+        AdminDemoteUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/users/{userId}/demote
+            Method: POST
+        AdminDeleteUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/users/{userId}
+            Method: DELETE
+        AdminListTrips:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/trips
+            Method: GET
+        AdminDeleteTrip:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/trips/{tripId}
+            Method: DELETE
+        AdminHideTrip:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /admin/trips/{tripId}/hide
+            Method: POST
+        GetUserPrefs:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /user/prefs
+            Method: GET
+        PutUserPrefs:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /user/prefs
+            Method: PUT
 
   WebSocketApi:
     Type: AWS::ApiGatewayV2::Api
@@ -378,9 +492,16 @@ Resources:
     Properties:
       IndexName: TripWizPlaceIndex
       DataSource: Esri
-      Description: "Place index for finding nearby indoor fallback activities"
+      Description: "Place index for geocoding and place search"
       DataSourceConfiguration:
         IntendedUse: SingleUse
+
+  TripWizRouteCalculator:
+    Type: AWS::Location::RouteCalculator
+    Properties:
+      CalculatorName: TripWizRouteCalculator
+      DataSource: Esri
+      Description: "Route calculator for road-following itinerary routes"
 
   OpenWeatherSecret:
     Type: AWS::SecretsManager::Secret
@@ -398,6 +519,35 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: TripWiz-Alerts
+
+  TripReminderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: TripWiz-TripReminder
+      CodeUri: ../src/
+      Handler: trip_reminder/index.handler
+      Runtime: nodejs24.x
+      Timeout: 60
+      Environment:
+        Variables:
+          TABLE_NAME:    !Ref TripWizTable
+          SOURCE_EMAIL:  !Ref SourceEmail
+          REMINDER_DAYS: !Ref ReminderDays
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TripWizTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - ses:SendEmail
+            Resource: '*'
+      Events:
+        DailyReminder:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 8 * * ? *)
+            Description: Send trip reminder emails daily at 8am UTC (11am Jerusalem)
+            Enabled: true
 
   SnsToSesFunction:
     Type: AWS::Serverless::Function
@@ -440,6 +590,14 @@ Resources:
         - ALLOW_REFRESH_TOKEN_AUTH
       PreventUserExistenceErrors: ENABLED
 
+  TripWizAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Admins
+      UserPoolId: !Ref TripWizUserPool
+      Description: TripWiz portal administrators (full access to admin endpoints)
+      Precedence: 1
+
 Parameters:
   AdminEmail:
     Type: String
@@ -447,6 +605,14 @@ Parameters:
   SourceEmail:
     Type: String
     Description: SES-verified sender email address for TripWiz alert emails (can be the same as AdminEmail)
+  AdminBootstrapEmails:
+    Type: String
+    Default: davidkitinberg@gmail.com
+    Description: Comma-separated emails granted admin access via whitelist (bootstrap path before Cognito Admins group membership)
+  ReminderDays:
+    Type: Number
+    Default: 2
+    Description: Days before a trip starts to send the reminder email (default 2 = 48 hours notice)
 
 Outputs:
   TripWizTableName:
@@ -468,6 +634,13 @@ Outputs:
     Description: Cognito user pool client id for the frontend
     Value: !Ref TripWizUserPoolClient
 
+  TripWizAdminGroupName:
+    Description: Cognito user-pool group that grants admin access
+    Value: !Ref TripWizAdminGroup
+
+  TripReminderFunctionName:
+    Description: Lambda that sends daily trip reminder emails
+    Value: !Ref TripReminderFunction
   AlertsTopicArn:
     Description: SNS Topic ARN for alerts
     Value: !Ref AlertsTopic

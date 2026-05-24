@@ -242,6 +242,9 @@ export default function HomePage() {
 
       <footer className="home-footer">
         <p>© 2026 TripWiz &nbsp;·&nbsp; Ariel University &nbsp;·&nbsp; David Kitinberg, Amit Bitton, Sagi Hassid</p>
+        <button className="home-footer-admin-link" onClick={() => navigate('/admin-login')}>
+          🔒 Admin Portal
+        </button>
       </footer>
 
       {/* ── AUTH CHOICE MODAL ─────────────────────────────────── */}

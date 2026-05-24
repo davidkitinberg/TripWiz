@@ -40,16 +40,19 @@ export default function TripMap({ dayGroups }) {
       />
 
       {dayGroups.map((group) => {
-        const line = group.points.map((p) => [p.lat, p.lng]);
+        // Use real road geometry from Amazon Location Service when available,
+        // otherwise fall back to straight dashed lines between stop markers.
+        const hasRoute = group.routePositions && group.routePositions.length > 1;
+        const line = hasRoute ? group.routePositions : group.points.map((p) => [p.lat, p.lng]);
         return (
           <React.Fragment key={group.dayIndex}>
             {line.length > 1 && (
               <Polyline
                 positions={line}
                 color={group.color}
-                weight={2.5}
-                dashArray="6 4"
-                opacity={0.85}
+                weight={hasRoute ? 3.5 : 2.5}
+                dashArray={hasRoute ? null : '6 4'}
+                opacity={0.9}
               />
             )}
             {group.points.map((point, idx) => {

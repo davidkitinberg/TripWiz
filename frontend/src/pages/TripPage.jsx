@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { connect, disconnect, on } from '../services/websocket';
 import TripMap from '../components/TripMap';
+import { ArrowLeft, Pencil, Share2, Bot, CloudSun, MapPin } from 'lucide-react';
 
 /* ─────────────── Helpers ─────────────── */
 
@@ -15,29 +16,19 @@ function useDebounce(value, delay) {
   return dv;
 }
 
-function estimateHours(osmClass, osmType) {
-  if (osmClass === 'amenity') {
-    if (['restaurant', 'cafe', 'bar', 'fast_food', 'pub'].includes(osmType)) return '1–2';
-    if (['cinema', 'theatre', 'arts_centre'].includes(osmType)) return '2–3';
-  }
-  if (osmClass === 'tourism') {
-    if (osmType === 'museum') return '2–3';
-    if (osmType === 'gallery') return '1–2';
-    if (osmType === 'viewpoint') return '0.5–1';
-    if (['attraction', 'artwork'].includes(osmType)) return '1–2';
-    if (osmType === 'theme_park') return '4–6';
-    if (osmType === 'zoo') return '3–4';
-  }
-  if (osmClass === 'leisure') {
-    if (['park', 'garden', 'nature_reserve'].includes(osmType)) return '1–3';
-    if (['beach_resort', 'water_park'].includes(osmType)) return '3–5';
-  }
-  if (osmClass === 'natural') {
-    if (osmType === 'beach') return '2–4';
-    if (osmType === 'peak') return '3–6';
-  }
-  if (osmClass === 'historic') return '1–3';
-  if (osmClass === 'shop') return '0.5–1';
+function estimateHours(categories = []) {
+  const cats = categories.map((c) => c.toLowerCase());
+  if (cats.some((c) => c.includes('airport') || c.includes('terminal'))) return '2–3';
+  if (cats.some((c) => c.includes('hotel') || c.includes('lodging') || c.includes('accommodation'))) return '0';
+  if (cats.some((c) => c.includes('museum') || c.includes('gallery'))) return '2–3';
+  if (cats.some((c) => c.includes('theme park') || c.includes('amusement'))) return '4–6';
+  if (cats.some((c) => c.includes('zoo') || c.includes('aquarium'))) return '3–4';
+  if (cats.some((c) => c.includes('beach'))) return '2–4';
+  if (cats.some((c) => c.includes('park') || c.includes('garden') || c.includes('nature'))) return '1–3';
+  if (cats.some((c) => c.includes('restaurant') || c.includes('food') || c.includes('cafe') || c.includes('bar'))) return '1–2';
+  if (cats.some((c) => c.includes('shop') || c.includes('market') || c.includes('store'))) return '0.5–1';
+  if (cats.some((c) => c.includes('attraction') || c.includes('landmark') || c.includes('historic'))) return '1–2';
+  if (cats.some((c) => c.includes('viewpoint') || c.includes('scenic'))) return '0.5–1';
   return '2–3';
 }
 
@@ -175,6 +166,105 @@ function itineraryToStops(itinerary, tripStartDate) {
 
 /* ─────────────── Autocomplete ─────────────── */
 
+function isHebrewText(text) {
+  return /[֐-׿יִ-ﭏ]/.test(text);
+}
+
+function placeIcon(cls, type) {
+  const t = (type || '').toLowerCase();
+  const c = (cls || '').toLowerCase();
+  if (t === 'museum' || t === 'gallery' || t === 'arts_centre') return '🏛️';
+  if (t === 'hotel' || t === 'hostel' || t === 'guest_house' || t === 'motel') return '🏨';
+  if (t === 'restaurant' || t === 'fast_food' || t === 'food_court') return '🍽️';
+  if (t === 'cafe' || t === 'coffee_shop') return '☕';
+  if (t === 'bar' || t === 'pub' || t === 'nightclub') return '🍺';
+  if (t === 'beach') return '🏖️';
+  if (t === 'theme_park' || t === 'amusement_park') return '🎡';
+  if (t === 'zoo') return '🦁';
+  if (t === 'aquarium') return '🐠';
+  if (t === 'aerodrome') return '✈️';
+  if (t === 'viewpoint') return '🔭';
+  if (t === 'monument' || t === 'memorial') return '🗿';
+  if (t === 'castle' || t === 'ruins' || t === 'fort') return '🏰';
+  if (t === 'park' || t === 'garden' || t === 'nature_reserve') return '🌿';
+  if (c === 'shop') return '🛍️';
+  if (c === 'historic') return '🏛️';
+  if (c === 'natural') return '🌲';
+  if (c === 'tourism' || t === 'attraction') return '🎯';
+  if (c === 'place') return '🏙️';
+  return '📍';
+}
+
+function countryFlag(code) {
+  if (!code || code.length !== 2) return '';
+  const c = code.toUpperCase();
+  try {
+    return String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65, 0x1F1E6 + c.charCodeAt(1) - 65);
+  } catch { return ''; }
+}
+
+function nominatimToCategories(cls, type) {
+  const t = (type || '').toLowerCase();
+  const c = (cls || '').toLowerCase();
+  const cats = [];
+  if (t === 'museum' || t === 'gallery') cats.push('museum');
+  if (t === 'hotel' || t === 'hostel' || t === 'guest_house') cats.push('hotel');
+  if (t === 'restaurant' || t === 'fast_food' || t === 'cafe') cats.push('restaurant');
+  if (t === 'bar' || t === 'pub') cats.push('bar');
+  if (t === 'beach') cats.push('beach');
+  if (t === 'park' || t === 'garden') cats.push('park');
+  if (c === 'natural') cats.push('nature');
+  if (t === 'theme_park' || t === 'amusement_park') cats.push('theme park');
+  if (t === 'zoo') cats.push('zoo');
+  if (t === 'aquarium') cats.push('aquarium');
+  if (t === 'aerodrome') cats.push('airport');
+  if (t === 'viewpoint') cats.push('viewpoint');
+  if (c === 'shop') cats.push('shop');
+  if (c === 'historic') cats.push('historic');
+  if (c === 'tourism' || t === 'attraction') cats.push('attraction');
+  return cats;
+}
+
+function parseNominatimResult(r, hebrewQuery) {
+  const addr = r.address || {};
+  const nd = r.namedetails || {};
+  const name = (hebrewQuery && nd['name:he'])
+    ? nd['name:he']
+    : (r.name || r.display_name.split(',')[0].trim());
+  const city = addr.city || addr.town || addr.village || addr.municipality || addr.county;
+  const country = addr.country;
+  const parts = [];
+  if (city && city !== name) parts.push(city);
+  if (country && country !== name) parts.push(country);
+  return {
+    name,
+    subtitle: parts.join(', '),
+    flag: countryFlag(addr.country_code || ''),
+    icon: placeIcon(r.class, r.type),
+    lat: parseFloat(r.lat),
+    lng: parseFloat(r.lon),
+    categories: nominatimToCategories(r.class, r.type),
+  };
+}
+
+async function searchNominatim(query) {
+  const hebrew = isHebrewText(query);
+  const lang = hebrew ? 'he,en' : 'en';
+  const params = new URLSearchParams({
+    q: query,
+    format: 'json',
+    addressdetails: '1',
+    namedetails: '1',
+    limit: '7',
+    dedupe: '1',
+    'accept-language': lang,
+  });
+  const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`);
+  if (!res.ok) throw new Error('Nominatim error');
+  const data = await res.json();
+  return data.map((r) => parseNominatimResult(r, hebrew));
+}
+
 function LocationAutocomplete({ onSelect }) {
   const [query, setQuery] = useState('');
   const [suggestions, setSuggestions] = useState([]);
@@ -182,29 +272,19 @@ function LocationAutocomplete({ onSelect }) {
   const [activeIdx, setActiveIdx] = useState(-1);
   const [loading, setLoading] = useState(false);
   const wrapperRef = useRef(null);
-  const debouncedQuery = useDebounce(query, 350);
+  const debouncedQuery = useDebounce(query, 420);
+  const isHebrew = isHebrewText(query);
 
   useEffect(() => {
-    if (debouncedQuery.length < 2) { setSuggestions([]); return; }
+    if (debouncedQuery.length < 2) { setSuggestions([]); setOpen(false); return; }
     setLoading(true);
-    fetch(
-      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(debouncedQuery)}&format=json&limit=6&addressdetails=0`,
-      { headers: { 'Accept-Language': 'en-US,en' } }
-    )
-      .then((r) => r.json())
-      .then((data) => {
-        setSuggestions(data.map((r) => ({
-          label: r.display_name,
-          short: r.display_name.split(',').slice(0, 2).join(',').trim(),
-          lat: parseFloat(r.lat),
-          lng: parseFloat(r.lon),
-          osmClass: r.class,
-          osmType: r.type,
-        })));
-        setOpen(true);
+    searchNominatim(debouncedQuery)
+      .then((results) => {
+        setSuggestions(results);
+        setOpen(results.length > 0);
         setActiveIdx(-1);
       })
-      .catch(() => {})
+      .catch(() => setSuggestions([]))
       .finally(() => setLoading(false));
   }, [debouncedQuery]);
 
@@ -218,10 +298,10 @@ function LocationAutocomplete({ onSelect }) {
 
   function selectSuggestion(s) {
     onSelect({
-      name: s.short,
+      name: s.name,
       lat: s.lat,
       lng: s.lng,
-      recommendedHours: estimateHours(s.osmClass, s.osmType),
+      recommendedHours: estimateHours(s.categories),
     });
     setQuery('');
     setSuggestions([]);
@@ -243,6 +323,7 @@ function LocationAutocomplete({ onSelect }) {
         <input
           className="planner-add-input"
           type="text"
+          dir={isHebrew ? 'rtl' : 'ltr'}
           placeholder="Add a destination or landmark…"
           value={query}
           onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
@@ -260,9 +341,11 @@ function LocationAutocomplete({ onSelect }) {
               className={`autocomplete-item ${i === activeIdx ? 'autocomplete-item--active' : ''}`}
               onMouseDown={() => selectSuggestion(s)}
             >
-              <span className="autocomplete-pin">📍</span>
-              <span className="autocomplete-label">{s.short}</span>
-              <span className="autocomplete-full">{s.label}</span>
+              <span className="autocomplete-pin">{s.icon}</span>
+              <span className="autocomplete-texts">
+                <span className={`autocomplete-label${isHebrew ? ' autocomplete-label--rtl' : ''}`}>{s.name}</span>
+                <span className="autocomplete-full">{s.subtitle}{s.flag ? ` ${s.flag}` : ''}</span>
+              </span>
             </li>
           ))}
         </ul>
@@ -273,7 +356,18 @@ function LocationAutocomplete({ onSelect }) {
 
 /* ─────────────── Stop card ─────────────── */
 
-function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, onRemove, onChangeDay, onChangeTime, onReplace }) {
+function weatherIcon(condition) {
+  const c = (condition || '').toLowerCase();
+  if (c.includes('thunder')) return '⛈️';
+  if (c.includes('rain') || c.includes('drizzle')) return '🌧️';
+  if (c.includes('snow')) return '❄️';
+  if (c.includes('mist') || c.includes('fog') || c.includes('haze')) return '🌫️';
+  if (c.includes('cloud')) return '⛅';
+  if (c.includes('clear')) return '☀️';
+  return '🌤️';
+}
+
+function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, weather, onRemove, onChangeDay, onChangeTime, onReplace }) {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const hasSuggestions = alert && suggestions && suggestions.length > 0;
 
@@ -287,6 +381,12 @@ function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, onR
         </div>
         <div className="stop-meta-row">
           <span className="stop-duration">🕒 {stop.recommendedHours} hrs</span>
+          {weather && (
+            <span className={`stop-weather-badge${weather.isAlert ? ' stop-weather-badge--alert' : ''}`}
+              title={weather.description || weather.condition}>
+              {weatherIcon(weather.condition)} {weather.tempC}°C
+            </span>
+          )}
         </div>
         {canEdit && (
           <div className="stop-controls">
@@ -357,6 +457,100 @@ function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, onR
   );
 }
 
+/* ─────────────── AI Suggestion Panel ─────────────── */
+
+function AiSuggestionPanel({ suggestion, onApply, onDismiss }) {
+  if (!suggestion) return null;
+
+  const daySet = [...new Set(suggestion.stops.map((s) => s.dayIndex ?? 0))].sort((a, b) => a - b);
+  const summaryByDay = new Map((suggestion.dailySummary || []).map((d) => [d.dayIndex, d]));
+
+  return (
+    <div className="ai-panel">
+      <div className="ai-panel-header">
+        <div className="ai-panel-header-left">
+          <span className="ai-panel-robot"><Bot size={24} strokeWidth={1.8} /></span>
+          <div>
+            <div className="ai-panel-title">AI Route Suggestion</div>
+            <div className="ai-panel-model">{suggestion.model || 'Claude Haiku'}</div>
+          </div>
+        </div>
+        <button className="ai-panel-close" onClick={onDismiss} title="Dismiss">×</button>
+      </div>
+
+      <div className="ai-panel-body">
+
+        {/* Stats chips */}
+        <div className="ai-panel-section">
+          <div className="ai-panel-section-label">📊 Summary</div>
+          <div className="ai-panel-chips">
+            {suggestion.savings > 0.02 && (
+              <span className="ai-chip ai-chip--green">
+                ⚡ ~{(suggestion.savings * 100).toFixed(0)}% less travel
+              </span>
+            )}
+            {suggestion.orderChanged && (
+              <span className="ai-chip ai-chip--blue">🔀 Order optimized</span>
+            )}
+            {suggestion.timesChanged && (
+              <span className="ai-chip ai-chip--purple">⏰ Times adjusted</span>
+            )}
+            {!suggestion.orderChanged && !suggestion.timesChanged && (
+              <span className="ai-chip ai-chip--gray">✓ Already optimal</span>
+            )}
+          </div>
+        </div>
+
+        {/* Overall reasoning */}
+        {suggestion.reasoning && (
+          <div className="ai-panel-section">
+            <div className="ai-panel-section-label">💡 Overall Strategy</div>
+            <div className="ai-panel-reasoning">{suggestion.reasoning}</div>
+          </div>
+        )}
+
+        {/* Day-by-day breakdown: heading + description + stop list per day */}
+        <div className="ai-panel-section">
+          <div className="ai-panel-section-label">📅 Day-by-Day Plan</div>
+          <div className="ai-stop-list">
+            {daySet.map((dayIdx) => {
+              const dayStops = suggestion.stops.filter((s) => (s.dayIndex ?? 0) === dayIdx);
+              const daySummary = summaryByDay.get(dayIdx);
+              return (
+                <div key={dayIdx} className="ai-day-group">
+                  <div className="ai-day-heading">
+                    {daySummary ? daySummary.heading : `Day ${dayIdx + 1}`}
+                  </div>
+                  {daySummary && (
+                    <div className="ai-day-description">{daySummary.description}</div>
+                  )}
+                  <div className="ai-day-stops">
+                    {dayStops.map((s, i) => (
+                      <div key={s.stopId} className="ai-stop-row">
+                        <span className="ai-stop-num">{i + 1}</span>
+                        <div className="ai-stop-info">
+                          <span className="ai-stop-name">{s.name}</span>
+                          {s.startTime && <span className="ai-stop-time">{s.startTime}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+      </div>
+
+      <div className="ai-panel-footer">
+        <button className="ai-panel-btn ai-panel-btn--dismiss" onClick={onDismiss}>Dismiss</button>
+        <button className="ai-panel-btn ai-panel-btn--apply" onClick={onApply}>Apply suggestion →</button>
+      </div>
+    </div>
+  );
+}
+
 /* ─────────────── Page ─────────────── */
 
 export default function TripPage() {
@@ -375,6 +569,7 @@ export default function TripPage() {
   const [validating, setValidating] = useState(false);
   const [alerts, setAlerts] = useState([]);
   const [fallbacks, setFallbacks] = useState({});
+  const [stopWeather, setStopWeather] = useState({});
   const [lastValidatedAt, setLastValidatedAt] = useState(null);
 
   const [showShareModal, setShowShareModal] = useState(false);
@@ -389,6 +584,7 @@ export default function TripPage() {
   const [routeSuggestion, setRouteSuggestion] = useState(null);
   const [optimizing, setOptimizing] = useState(false);
   const [activeDayFilter, setActiveDayFilter] = useState('all');
+  const [dayRoutes, setDayRoutes] = useState({});
   const [pendingLocation, setPendingLocation] = useState(null);
   const [pendingDay, setPendingDay] = useState(0);
   const [pendingTime, setPendingTime] = useState('');
@@ -425,6 +621,14 @@ export default function TripPage() {
         setFallbacks(map);
       })
       .catch((err) => console.warn('Failed to load fallbacks:', err));
+
+    api.getTripWeather(tripId)
+      .then((res) => {
+        const map = {};
+        (res.weather || []).forEach((w) => { map[w.slotId] = w; });
+        setStopWeather(map);
+      })
+      .catch(() => {});
   }, [tripId]);
 
   useEffect(() => {
@@ -433,6 +637,8 @@ export default function TripPage() {
     const offEdit = on('edit', (msg) => {
       if (msg.payload?.accepted && msg.payload?.trip) {
         const incoming = msg.payload.trip;
+        // Skip if this is an echo of our own save — our version is already up to date
+        if (incoming.version <= versionRef.current) return;
         setTrip(incoming);
         setStops(itineraryToStops(incoming.itinerary, incoming.startDate));
         versionRef.current = incoming.version;
@@ -441,6 +647,19 @@ export default function TripPage() {
     connect(tripId).catch(console.warn);
     return () => { offConnected(); offDisconnected(); offEdit(); disconnect(); };
   }, [tripId]);
+
+  const debouncedStops = useDebounce(stops, 1500);
+  useEffect(() => {
+    const geoStops = debouncedStops.filter((s) => s.lat != null && s.lng != null);
+    if (geoStops.length < 2) { setDayRoutes({}); return; }
+    api.calculateRoute(geoStops.map((s) => ({ lat: s.lat, lng: s.lng, dayIndex: s.dayIndex ?? 0 })))
+      .then((res) => {
+        const map = {};
+        for (const d of res.days || []) map[d.dayIndex] = d.positions;
+        setDayRoutes(map);
+      })
+      .catch(() => {}); // silently fall back to straight lines
+  }, [debouncedStops]);
 
   const canEdit = access === 'owner' || access === 'editor';
 
@@ -606,6 +825,7 @@ export default function TripPage() {
         timesChanged,
         savings,
         reasoning: result.reasoning || '',
+        dailySummary: result.dailySummary || [],
         model: result.model
       });
       setValidateMsg('');
@@ -619,11 +839,32 @@ export default function TripPage() {
     }
   }
 
-  function applyRouteSuggestion() {
+  async function applyRouteSuggestion() {
     if (!routeSuggestion) return;
-    setStops(routeSuggestion.stops);
-    scheduleSave(routeSuggestion.stops);
+    const appliedStops = routeSuggestion.stops;
+    // Update UI immediately, close the panel, cancel any pending debounce timer
+    setStops(appliedStops);
     setRouteSuggestion(null);
+    clearTimeout(saveTimerRef.current);
+    // Save directly — no debounce so nothing can cancel this
+    setSaveStatus('saving');
+    try {
+      const tripStartDate = tripRef.current?.startDate;
+      const patch = {
+        itinerary: stopsToItinerary(appliedStops, tripStartDate),
+        version: versionRef.current,
+      };
+      const res = await api.updateTrip(tripId, patch);
+      setTrip(res.trip);
+      versionRef.current = res.trip.version;
+      setSaveStatus('saved');
+      setValidateMsg('✓ AI suggestion applied and saved.');
+    } catch (err) {
+      setSaveStatus('unsaved');
+      setError(err.code === 'VERSION_CONFLICT'
+        ? 'Version conflict — someone else edited this trip. Refresh to get the latest.'
+        : `Apply failed: ${err.message}`);
+    }
   }
 
   function dismissRouteSuggestion() {
@@ -715,6 +956,7 @@ export default function TripPage() {
     setValidating(true);
     setAlerts([]);
     setFallbacks({});
+    setStopWeather({});
     setValidateMsg('Triggering weather check…');
     const baseline = lastValidatedAt;
 
@@ -734,6 +976,15 @@ export default function TripPage() {
         } catch {}
       };
 
+      const refreshWeather = async () => {
+        try {
+          const wRes = await api.getTripWeather(tripId);
+          const map = {};
+          (wRes.weather || []).forEach((w) => { map[w.slotId] = w; });
+          setStopWeather(map);
+        } catch {}
+      };
+
       for (let attempt = 0; attempt < 14; attempt++) {
         await new Promise((r) => setTimeout(r, 2500));
         const res = await api.getTripAlerts(tripId);
@@ -741,7 +992,7 @@ export default function TripPage() {
         if (updated) {
           setAlerts(res.alerts || []);
           setLastValidatedAt(res.lastValidatedAt);
-          await refreshFallbacks();
+          await Promise.all([refreshFallbacks(), refreshWeather()]);
           const n = (res.alerts || []).length;
           setValidateMsg(
             n === 0
@@ -757,7 +1008,7 @@ export default function TripPage() {
       if (finalRes.lastValidatedAt && finalRes.lastValidatedAt !== baseline) {
         setAlerts(finalRes.alerts || []);
         setLastValidatedAt(finalRes.lastValidatedAt);
-        await refreshFallbacks();
+        await Promise.all([refreshFallbacks(), refreshWeather()]);
         const n = (finalRes.alerts || []).length;
         setValidateMsg(
           n === 0
@@ -787,13 +1038,11 @@ export default function TripPage() {
     );
   }
 
-  /* Group + globally number stops (use suggestion if previewing) */
-  const isPreview = !!routeSuggestion;
-  const displayStops = isPreview ? routeSuggestion.stops : stops;
-  const totalDays = getTotalDays(trip, displayStops);
+  /* Group + globally number stops — always use original stops so sidebar is never overridden */
+  const totalDays = getTotalDays(trip, stops);
   const dayGroups = {};
   for (let i = 0; i < totalDays; i++) dayGroups[i] = [];
-  displayStops.forEach((s) => {
+  stops.forEach((s) => {
     const d = Math.max(0, s.dayIndex || 0);
     if (!dayGroups[d]) dayGroups[d] = [];
     dayGroups[d].push(s);
@@ -817,6 +1066,7 @@ export default function TripPage() {
   const mapDayGroups = sidebarDays.map((dayIdx) => ({
     dayIndex: dayIdx,
     color: DAY_COLORS[dayIdx % DAY_COLORS.length],
+    routePositions: dayRoutes[dayIdx] || null,
     points: (dayGroups[dayIdx] || [])
       .filter((s) => s.lat != null && s.lng != null)
       .map((s) => ({
@@ -831,10 +1081,20 @@ export default function TripPage() {
   return (
     <div className="planner-page">
 
+      {/* Aurora background */}
+      <div className="planner-bg" aria-hidden="true">
+        <div className="aurora-orb aurora-orb--1" />
+        <div className="aurora-orb aurora-orb--2" />
+        <div className="aurora-orb aurora-orb--3" />
+        <div className="aurora-orb aurora-orb--4" />
+      </div>
+
       {/* Header */}
       <header className="planner-header">
         <div className="planner-header-left">
-          <button className="link-btn planner-back-btn" onClick={() => navigate('/trips')}>← Trips</button>
+          <button className="link-btn planner-back-btn" onClick={() => navigate('/trips')}>
+            <ArrowLeft size={14} strokeWidth={2.5} /> Trips
+          </button>
 
           <div className="planner-title-row">
             {editingTitle ? (
@@ -854,7 +1114,7 @@ export default function TripPage() {
                 <span className="planner-title-text">{trip.title || 'Untitled Trip'}</span>
                 {canEdit && (
                   <button className="planner-title-edit-btn" onClick={startEditTitle} title="Edit title">
-                    ✏️
+                    <Pencil size={13} strokeWidth={2.2} />
                   </button>
                 )}
               </>
@@ -878,7 +1138,9 @@ export default function TripPage() {
             <span className={`dot ${wsConnected ? 'green' : 'grey'}`} />
             {wsConnected ? 'Live' : 'Offline'}
           </div>
-          <button className="planner-share-btn" onClick={openShareModal}>🔗 Share</button>
+          <button className="planner-share-btn" onClick={openShareModal}>
+            <Share2 size={14} strokeWidth={2.2} /> Share
+          </button>
         </div>
       </header>
 
@@ -900,6 +1162,7 @@ export default function TripPage() {
 
         {/* Left panel */}
         <div className="planner-left">
+
           {canEdit && (
             <div className="planner-add-section">
               <LocationAutocomplete onSelect={handleLocationSelect} />
@@ -931,7 +1194,7 @@ export default function TripPage() {
             </div>
           )}
 
-          {(alerts.length > 0 || lastValidatedAt) && !isPreview && (
+          {(alerts.length > 0 || lastValidatedAt) && (
             <div className={`alerts-summary ${alerts.length > 0 ? 'alerts-summary--warn' : 'alerts-summary--ok'}`}>
               <div className="alerts-summary-icon">{alerts.length > 0 ? '⚠️' : '✓'}</div>
               <div className="alerts-summary-text">
@@ -951,41 +1214,7 @@ export default function TripPage() {
             </div>
           )}
 
-          {isPreview && (
-            <div className="route-suggestion-banner">
-              <div className="route-suggestion-icon">🤖</div>
-              <div className="route-suggestion-text">
-                <div className="route-suggestion-title">
-                  Claude suggests this route
-                </div>
-                {routeSuggestion.reasoning && (
-                  <div className="route-suggestion-reasoning">
-                    "{routeSuggestion.reasoning}"
-                  </div>
-                )}
-                <div className="route-suggestion-summary">
-                  {routeSuggestion.savings > 0.02 && (
-                    <>~{(routeSuggestion.savings * 100).toFixed(0)}% shorter travel · </>
-                  )}
-                  {routeSuggestion.orderChanged && routeSuggestion.timesChanged
-                    ? 'Stops reordered and times reassigned'
-                    : routeSuggestion.orderChanged
-                      ? 'Stops reordered'
-                      : 'Times reassigned'}
-                </div>
-              </div>
-              <div className="route-suggestion-actions">
-                <button className="route-suggestion-apply" onClick={applyRouteSuggestion}>
-                  Apply
-                </button>
-                <button className="route-suggestion-cancel" onClick={dismissRouteSuggestion}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div className={`planner-stops ${isPreview ? 'planner-stops--preview' : ''}`}>
+          <div className="planner-stops">
             {stops.length === 0 ? (
               <div className="planner-empty">
                 <span style={{ fontSize: '2.5rem' }}>🗺️</span>
@@ -1016,9 +1245,10 @@ export default function TripPage() {
                             stop={stop}
                             globalNum={globalNum.get(stop.stopId)}
                             totalDays={totalDays}
-                            canEdit={canEdit && !isPreview}
-                            alert={isPreview ? null : alertsBySlot.get(stop.stopId)}
-                            suggestions={isPreview ? null : fallbacks[stop.stopId]}
+                            canEdit={canEdit}
+                            alert={alertsBySlot.get(stop.stopId)}
+                            suggestions={fallbacks[stop.stopId]}
+                            weather={stopWeather[stop.stopId]}
                             onRemove={() => removeStop(stop.stopId)}
                             onChangeDay={(d) => updateStop(stop.stopId, { dayIndex: d })}
                             onChangeTime={(t) => updateStop(stop.stopId, { startTime: t })}
@@ -1033,25 +1263,32 @@ export default function TripPage() {
             )}
           </div>
 
-          {stops.length > 1 && canEdit && !isPreview && (
+          {stops.length > 1 && canEdit && (
             <button
               className="planner-optimize-btn"
               onClick={handleOptimize}
               disabled={optimizing}
             >
-              {optimizing ? '🤖 Claude is thinking…' : '🤖 Optimize with Claude'}
+              <Bot size={15} strokeWidth={2} />
+              {optimizing ? 'Claude is thinking…' : 'Optimize with Claude'}
             </button>
           )}
-          {!isPreview && (
-            <button
-              className="planner-weather-btn secondary-btn"
-              onClick={handleValidate}
-              disabled={validating}
-            >
-              {validating ? '⏳ Checking weather…' : '🌦️ Check Weather'}
-            </button>
-          )}
+          <button
+            className="planner-weather-btn secondary-btn"
+            onClick={handleValidate}
+            disabled={validating}
+          >
+            <CloudSun size={15} strokeWidth={2} />
+            {validating ? 'Checking weather…' : 'Check Weather'}
+          </button>
         </div>
+
+        {/* AI suggestion slide-in panel */}
+        <AiSuggestionPanel
+          suggestion={routeSuggestion}
+          onApply={applyRouteSuggestion}
+          onDismiss={dismissRouteSuggestion}
+        />
 
         {/* Right panel: map */}
         <div className="planner-right">
@@ -1064,7 +1301,7 @@ export default function TripPage() {
         <div className="add-stop-backdrop" onClick={() => setPendingLocation(null)}>
           <div className="add-stop-modal" onClick={(e) => e.stopPropagation()}>
             <div className="add-stop-place">
-              <span className="add-stop-pin">📍</span>
+              <span className="add-stop-pin"><MapPin size={20} strokeWidth={2} color="#a5b4fc" /></span>
               <div className="add-stop-place-info">
                 <div className="add-stop-place-name">{pendingLocation.name}</div>
                 <div className="add-stop-place-duration">~{pendingLocation.recommendedHours} hrs estimated</div>

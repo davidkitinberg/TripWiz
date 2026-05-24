@@ -6,12 +6,16 @@ const lambda = new AWS.Lambda();
 const secrets = new AWS.SecretsManager();
 const cognito = new AWS.CognitoIdentityServiceProvider();
 const bedrock = new AWS.BedrockRuntime();
+const location = new AWS.Location();
 
 const TABLE_NAME = process.env.TABLE_NAME;
 const VALIDATE_FUNCTION_NAME = process.env.VALIDATE_FUNCTION_NAME;
 const MAPPING_SECRET_ARN = process.env.MAPPING_SECRET_ARN;
 const USER_POOL_ID = process.env.USER_POOL_ID;
 const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+const PLACE_INDEX_NAME = process.env.PLACE_INDEX_NAME || 'TripWizPlaceIndex';
+const ROUTE_CALCULATOR_NAME = process.env.ROUTE_CALCULATOR_NAME || 'TripWizRouteCalculator';
+const WS_ENDPOINT = process.env.WS_ENDPOINT;
 
 const uuid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const ok = (statusCode, body) => ({ statusCode, headers: corsHeaders(), body: body === undefined ? '' : JSON.stringify(body) });
@@ -38,6 +42,135 @@ function parseBody(event) {
 function getUserId(event) {
   const claims = event.requestContext && event.requestContext.authorizer && event.requestContext.authorizer.claims;
   return claims && claims.sub;
+}
+
+/* ─── Admin auth helpers ───────────────────────────────── */
+
+const ADMIN_EMAILS = new Set(
+  String(process.env.ADMIN_EMAILS || '')
+    .toLowerCase()
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
+const ADMIN_GROUP_NAME = 'Admins';
+
+const DEFAULT_TRENDING = [
+  { city: 'Tokyo',     country: 'Japan',  tag: 'Culture & Food',   emoji: '🗾' },
+  { city: 'New York',  country: 'USA',    tag: 'City Break',       emoji: '🗽' },
+  { city: 'Santorini', country: 'Greece', tag: 'Beach & Sun',      emoji: '🏖️' },
+  { city: 'Kyoto',     country: 'Japan',  tag: 'History & Nature', emoji: '⛩️' },
+];
+
+function getUserClaims(event) {
+  return (event.requestContext && event.requestContext.authorizer && event.requestContext.authorizer.claims) || {};
+}
+
+function getUserEmail(event) {
+  const email = getUserClaims(event).email;
+  return email ? String(email).toLowerCase() : null;
+}
+
+function getUserGroups(event) {
+  const raw = getUserClaims(event)['cognito:groups'];
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  // Cognito sometimes serialises groups as "[Admins, Other]" — strip brackets/quotes
+  return String(raw).replace(/[\[\]"\s]/g, '').split(',').filter(Boolean);
+}
+
+function isAdminEvent(event) {
+  if (getUserGroups(event).includes(ADMIN_GROUP_NAME)) return true;
+  const email = getUserEmail(event);
+  return !!(email && ADMIN_EMAILS.has(email));
+}
+
+function requireAdmin(event) {
+  if (!isAdminEvent(event)) {
+    const err = new Error('Admin access required');
+    err.statusCode = 403;
+    err.code = 'FORBIDDEN';
+    throw err;
+  }
+}
+
+async function usernameFromSub(sub) {
+  if (!USER_POOL_ID || !sub) return null;
+  const safe = String(sub).replace(/"/g, '\\"');
+  const res = await cognito.listUsers({
+    UserPoolId: USER_POOL_ID,
+    Filter: `sub = "${safe}"`,
+    Limit: 1
+  }).promise();
+  if (!res.Users || res.Users.length === 0) return null;
+  return res.Users[0].Username;
+}
+
+async function listAllCognitoUsers(maxTotal = 1000) {
+  const out = [];
+  let paginationToken;
+  do {
+    const res = await cognito.listUsers({
+      UserPoolId: USER_POOL_ID,
+      Limit: 60,
+      PaginationToken: paginationToken
+    }).promise();
+    out.push(...(res.Users || []));
+    paginationToken = res.PaginationToken;
+  } while (paginationToken && out.length < maxTotal);
+  return out;
+}
+
+async function listAdminGroupSubs() {
+  const subs = new Set();
+  let nextToken;
+  try {
+    do {
+      const res = await cognito.listUsersInGroup({
+        UserPoolId: USER_POOL_ID,
+        GroupName: ADMIN_GROUP_NAME,
+        Limit: 60,
+        NextToken: nextToken
+      }).promise();
+      for (const u of res.Users || []) {
+        const sub = (u.Attributes.find((a) => a.Name === 'sub') || {}).Value;
+        if (sub) subs.add(sub);
+      }
+      nextToken = res.NextToken;
+    } while (nextToken);
+  } catch (e) {
+    console.warn('listUsersInGroup failed (group may not exist yet):', e.message);
+  }
+  return subs;
+}
+
+async function queryAllTripsInGsi() {
+  const trips = [];
+  let lastKey;
+  do {
+    const res = await ddb.query({
+      TableName: TABLE_NAME,
+      IndexName: 'GSI1',
+      KeyConditionExpression: 'GSI1PK = :pk',
+      ExpressionAttributeValues: { ':pk': 'TRIP' },
+      ExclusiveStartKey: lastKey
+    }).promise();
+    trips.push(...(res.Items || []));
+    lastKey = res.LastEvaluatedKey;
+  } while (lastKey);
+  return trips;
+}
+
+async function findTripByIdAnyOwner(tripId) {
+  const res = await ddb.query({
+    TableName: TABLE_NAME,
+    IndexName: 'GSI1',
+    KeyConditionExpression: 'GSI1PK = :pk',
+    FilterExpression: 'tripId = :tid',
+    ExpressionAttributeValues: { ':pk': 'TRIP', ':tid': tripId }
+  }).promise();
+  return (res.Items && res.Items[0]) || null;
 }
 
 function normalizeCollaborators(collaborators) {
@@ -82,19 +215,36 @@ async function getTripAccess(userId, tripId) {
 }
 
 async function resolveTripForUser(userId, tripId) {
+  // 1. Owner: their own copy is stored directly under USER#userId
   const pointer = await getUserTripPointer(userId, tripId);
-
   if (pointer && pointer.entityType === 'Trip') {
     return { trip: pointer, access: { role: 'owner', ownerId: userId } };
   }
 
+  // 2. Invited collaborator: explicit ACCESS record exists
   const access = await getTripAccess(userId, tripId);
   const ownerId = (access && access.ownerId) || (pointer && pointer.ownerId);
-  if (!ownerId) return null;
+  if (ownerId) {
+    const ownerTrip = await getUserTripPointer(ownerId, tripId);
+    if (!ownerTrip || ownerTrip.deleted) return null;
+    return { trip: ownerTrip, access: access || { role: 'viewer', ownerId } };
+  }
 
-  const ownerTrip = await getUserTripPointer(ownerId, tripId);
+  // 3. Link-sharing fallback: any authenticated TripWiz user with the URL gets
+  //    read-only viewer access. Find the trip owner via the TRIP partition's
+  //    access records (the owner record is always there after trip creation).
+  const anyRes = await ddb.query({
+    TableName: TABLE_NAME,
+    KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
+    ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': 'ACCESS#' },
+    Limit: 1
+  }).promise();
+  const anyAccess = anyRes.Items && anyRes.Items[0];
+  if (!anyAccess) return null;
+
+  const ownerTrip = await getUserTripPointer(anyAccess.ownerId, tripId);
   if (!ownerTrip || ownerTrip.deleted) return null;
-  return { trip: ownerTrip, access: access || { role: 'viewer', ownerId } };
+  return { trip: ownerTrip, access: { role: 'viewer', ownerId: anyAccess.ownerId } };
 }
 
 function publicTrip(item) {
@@ -234,30 +384,41 @@ async function optimizeWithBedrock(itinerary) {
     };
   });
 
-  const prompt = `You are a travel-planning assistant for TripWiz. Reorder the user's trip stops within each day into a smart, efficient itinerary and assign sensible visit times.
+  const systemPrompt = `You are TripWiz, an expert travel planner with deep knowledge of geography, logistics, and creating memorable travel experiences. When given a list of trip stops you reorder them day-by-day into the most logical, efficient, and enjoyable itinerary possible. You reason carefully about geography, travel time, meal timing, attraction types, and practical constraints.
 
-Stop types:
-- "airport" / "transit": Time-critical anchors (flights, trains). NEVER move or retime these. Keep scheduledTime exactly.
-- "hotel": Accommodation anchors. A hotel that isFirstInDay=true is a check-out and must stay first in its day. A hotel that isLastInDay=true is a check-in and must stay last. Do not reorder hotels relative to fixed stops.
-- "attraction": Freely reorderable within the day.
+CRITICAL CONSTRAINT — AIRPORTS, FLIGHTS & TERMINALS (ABSOLUTELY NON-NEGOTIABLE):
+Any stop with type "airport" or "transit", OR whose name contains words like "airport", "terminal", "flight", "departure", or "arrival", is a FIXED TIME ANCHOR. You MUST:
+- Keep it on its EXACT dayIndex — never reassign it to a different day
+- Output its scheduledTime UNCHANGED in your JSON — do not alter it by even one minute
+- Never reorder it relative to other fixed stops on the same day
+These are real-world flights with real consequences. There are ZERO exceptions to this rule.`;
+
+  const userPrompt = `Analyze the following trip itinerary and produce a detailed optimized schedule.
 
 Stops:
 ${JSON.stringify(stops, null, 2)}
 
 Rules:
-1. Keep each stop on its current dayIndex — never move stops between days.
-2. For isFixed=true stops: preserve their exact position (first or last as given) and keep scheduledTime unchanged in your output.
-3. For hotel stops: obey isFirstInDay / isLastInDay — a check-out hotel must be before all other stops; a check-in hotel must be after all other stops.
-4. For attraction stops: reorder within the day to minimize travel (use lat/lng) and create a logical flow (cafes/breakfast early, museums/sights in morning, parks/viewpoints afternoon, restaurants at meal times).
-5. Assign startTime in 24-hour "HH:MM" format. First attraction no earlier than 09:00; last stop finishes by 22:00. Allow 15 minutes travel buffer between stops plus each stop's durationHours (use lower bound if a range).
-6. Use exactly the stopIds provided. Do not add or drop any.
+1. NEVER change dayIndex or scheduledTime for any stop where isFixed=true. Output their times exactly as given.
+2. Hotels obey isFirstInDay / isLastInDay — a check-out hotel must remain first in its day; a check-in hotel must remain last.
+3. Reorder attraction stops within each day to minimize travel distance (use lat/lng) and create a pleasant, logical flow: breakfast cafes early morning, museums and landmarks mid-morning, parks and outdoor sights in the afternoon, restaurants at meal times.
+4. Assign startTime for every stop in "HH:MM" 24-hour format. First attraction no earlier than 09:00; last stop should finish by 22:00. Allow 15 min travel buffer between stops plus each stop's durationHours (use the lower bound of any range).
+5. Never move a stop to a different day. Never add or remove any stop.
+6. Use exactly the stopIds provided.
 
-Respond with ONLY a single JSON object — no prose, no markdown fences:
+Respond with ONLY a valid JSON object — absolutely no markdown fences, no prose outside the JSON:
 {
   "stops": [
     {"stopId": "<id>", "dayIndex": <int>, "startTime": "HH:MM"}
   ],
-  "reasoning": "1-2 sentence explanation of the chosen flow"
+  "reasoning": "Write 3-5 detailed paragraphs explaining your overall strategy: the geographic logic you used, how you handled any fixed anchors, why certain stops are grouped together, and the general experience you are trying to create for the traveler.",
+  "dailySummary": [
+    {
+      "dayIndex": <int>,
+      "heading": "Day N — <evocative theme or neighborhood name>",
+      "description": "Write 3-5 sentences describing this specific day in detail: what the traveler will experience in sequence, why this order makes geographic and experiential sense, any notable transitions between areas, how travel time was managed, and what makes this day's flow enjoyable."
+    }
+  ]
 }`;
 
   const res = await bedrock.invokeModel({
@@ -266,8 +427,9 @@ Respond with ONLY a single JSON object — no prose, no markdown fences:
     accept: 'application/json',
     body: JSON.stringify({
       anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 2048,
-      messages: [{ role: 'user', content: prompt }]
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
     })
   }).promise();
 
@@ -299,58 +461,145 @@ Respond with ONLY a single JSON object — no prose, no markdown fences:
       startTime: typeof p.startTime === 'string' && /^\d{2}:\d{2}$/.test(p.startTime) ? p.startTime : ''
     }));
 
+  const dailySummary = Array.isArray(parsed.dailySummary)
+    ? parsed.dailySummary
+        .filter((d) => d && Number.isInteger(d.dayIndex) && typeof d.description === 'string')
+        .map((d) => ({
+          dayIndex: d.dayIndex,
+          heading: typeof d.heading === 'string' ? d.heading : `Day ${d.dayIndex + 1}`,
+          description: d.description
+        }))
+    : [];
+
   return {
     stops: cleanedStops,
     reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : '',
+    dailySummary,
     model: BEDROCK_MODEL_ID
   };
 }
 
-async function calculateRoute(body) {
-  if (!MAPPING_SECRET_ARN) {
-    const e = new Error('Mapping secret is not configured');
-    e.statusCode = 500;
-    e.code = 'CONFIGURATION_ERROR';
-    throw e;
-  }
-
-  if (!Array.isArray(body.waypoints) || body.waypoints.length < 2) {
-    const e = new Error('At least two waypoints are required');
+async function searchPlaces(query, biasLng, biasLat) {
+  if (!query || query.length < 2) {
+    const e = new Error('Query must be at least 2 characters');
     e.statusCode = 400;
-    e.code = 'INVALID_WAYPOINTS';
+    e.code = 'INVALID_QUERY';
     throw e;
   }
 
-  const secret = await getSecretJson(MAPPING_SECRET_ARN);
-  const routeUrl = secret.routeUrl || secret.url;
-  const apiKey = secret.apiKey || secret.key || secret.MAPPING_API_KEY;
-  if (!routeUrl || !apiKey) {
-    const e = new Error('Mapping secret must include routeUrl and apiKey');
-    e.statusCode = 500;
-    e.code = 'MAPPING_SECRET_INVALID';
+  const params = {
+    IndexName: PLACE_INDEX_NAME,
+    Text: query,
+    MaxResults: 6,
+    Language: 'en',
+  };
+  if (biasLng != null && biasLat != null) {
+    params.BiasPosition = [parseFloat(biasLng), parseFloat(biasLat)];
+  }
+
+  const result = await location.searchPlaceIndexForText(params).promise();
+
+  return (result.Results || []).map((r) => {
+    const p = r.Place;
+    const [lng, lat] = p.Geometry.Point;
+    const parts = [p.Label];
+    const short = (p.Label || '').split(',').slice(0, 2).join(',').trim();
+    return {
+      label: p.Label || '',
+      short,
+      lat,
+      lng,
+      categories: p.Categories || [],
+      placeId: r.PlaceId || null,
+    };
+  });
+}
+
+async function calculateRoute(body) {
+  const { stops } = body;
+  if (!Array.isArray(stops) || stops.length < 2) {
+    const e = new Error('At least two stops are required');
+    e.statusCode = 400;
+    e.code = 'INVALID_STOPS';
     throw e;
   }
 
-  const res = await fetch(routeUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      waypoints: body.waypoints,
-      profile: body.profile || 'driving'
-    })
+  // Group stops by dayIndex
+  const byDay = {};
+  for (const s of stops) {
+    const d = s.dayIndex ?? 0;
+    if (!byDay[d]) byDay[d] = [];
+    byDay[d].push(s);
+  }
+
+  const days = [];
+  for (const [dayStr, dayStops] of Object.entries(byDay)) {
+    const dayIndex = parseInt(dayStr, 10);
+    if (dayStops.length < 2) {
+      // Single stop — return just that point, no route needed
+      days.push({ dayIndex, positions: [[dayStops[0].lat, dayStops[0].lng]] });
+      continue;
+    }
+
+    const departure = [dayStops[0].lng, dayStops[0].lat];
+    const destination = [dayStops[dayStops.length - 1].lng, dayStops[dayStops.length - 1].lat];
+    const waypoints = dayStops.slice(1, -1).map((s) => ({ Position: [s.lng, s.lat] }));
+
+    const params = {
+      CalculatorName: ROUTE_CALCULATOR_NAME,
+      DeparturePosition: departure,
+      DestinationPosition: destination,
+      TravelMode: 'Car',
+      IncludeLegGeometry: true,
+    };
+    if (waypoints.length > 0) params.WaypointPositions = waypoints.map((w) => w.Position);
+
+    const result = await location.calculateRoute(params).promise();
+
+    // Flatten all leg geometries into a single ordered position list [lat, lng]
+    const positions = [];
+    for (const leg of result.Legs || []) {
+      const pts = (leg.Geometry && leg.Geometry.LineString) || [];
+      for (const [lng, lat] of pts) {
+        positions.push([lat, lng]);
+      }
+    }
+
+    days.push({ dayIndex, positions });
+  }
+
+  return { days };
+}
+
+async function broadcastTripUpdate(tripId, trip, editorUserId) {
+  if (!WS_ENDPOINT) return;
+  const connections = await ddb.query({
+    TableName: TABLE_NAME,
+    KeyConditionExpression: 'PK = :pk',
+    ExpressionAttributeValues: { ':pk': `CONN#TRIP#${tripId}` }
+  }).promise();
+  if (!connections.Items || connections.Items.length === 0) return;
+
+  const apigw = new AWS.ApiGatewayManagementApi({ endpoint: WS_ENDPOINT });
+  const message = JSON.stringify({
+    action: 'edit',
+    tripId,
+    userId: editorUserId,
+    payload: { accepted: true, trip, version: trip.version }
   });
 
-  if (!res.ok) {
-    const e = new Error(`Mapping provider returned ${res.status}`);
-    e.statusCode = 502;
-    e.code = 'MAPPING_PROVIDER_ERROR';
-    throw e;
-  }
-
-  return res.json();
+  await Promise.all(connections.Items.map(async (conn) => {
+    try {
+      await apigw.postToConnection({ ConnectionId: conn.connectionId, Data: message }).promise();
+    } catch (err) {
+      if (err.statusCode === 410) {
+        await ddb.delete({
+          TableName: TABLE_NAME,
+          Key: { PK: `CONN#TRIP#${tripId}`, SK: `CONN#${conn.connectionId}` }
+        }).promise();
+      }
+    }
+  }));
 }
 
 exports.handler = async (event) => {
@@ -469,6 +718,11 @@ exports.handler = async (event) => {
           await syncAccessRecords(resolved.trip, updateRes.Attributes);
         }
 
+        // Broadcast to all other connected collaborators so they see the change live
+        broadcastTripUpdate(tripId, publicTrip(updateRes.Attributes), userId).catch((e) =>
+          console.warn('WS broadcast failed (non-fatal):', e.message)
+        );
+
         return ok(200, { trip: publicTrip(updateRes.Attributes) });
       } catch (err) {
         if (err.code === 'ConditionalCheckFailedException') {
@@ -544,6 +798,35 @@ exports.handler = async (event) => {
       }));
 
       return ok(200, { fallbacks, count: fallbacks.length });
+    }
+
+    if (method === 'GET' && path === '/trips/{tripId}/weather') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
+      const resolved = await resolveTripForUser(userId, tripId);
+      if (!resolved) return fail(404, 'NOT_FOUND', 'Trip not found');
+
+      const res = await ddb.query({
+        TableName: TABLE_NAME,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
+        ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': 'WEATHER#' }
+      }).promise();
+
+      const weather = (res.Items || []).map((item) => {
+        const { PK, SK, ttl, entityType, ...rest } = item;
+        return rest;
+      });
+
+      const meta = await ddb.get({
+        TableName: TABLE_NAME,
+        Key: { PK: `TRIP#${tripId}`, SK: 'META#VALIDATION' }
+      }).promise();
+
+      return ok(200, {
+        weather,
+        count: weather.length,
+        lastValidatedAt: meta.Item ? meta.Item.lastValidatedAt : null
+      });
     }
 
     if (method === 'POST' && path === '/trips/{tripId}/validate') {
@@ -759,6 +1042,319 @@ exports.handler = async (event) => {
       const body = parseBody(event);
       const route = await calculateRoute(body);
       return ok(200, route);
+    }
+
+    if (method === 'GET' && path === '/places/search') {
+      const q = (event.queryStringParameters || {}).q || '';
+      const biasLng = (event.queryStringParameters || {}).lng;
+      const biasLat = (event.queryStringParameters || {}).lat;
+      const results = await searchPlaces(q, biasLng, biasLat);
+      return ok(200, { results });
+    }
+
+    /* ─── Trending destinations (read = any signed-in user; write = admin) ─── */
+
+    if (method === 'GET' && path === '/trending') {
+      const res = await ddb.get({
+        TableName: TABLE_NAME,
+        Key: { PK: 'SETTINGS', SK: 'TRENDING' }
+      }).promise();
+      const destinations = (res.Item && Array.isArray(res.Item.destinations) && res.Item.destinations.length > 0)
+        ? res.Item.destinations
+        : DEFAULT_TRENDING;
+      return ok(200, { destinations, updatedAt: res.Item && res.Item.updatedAt });
+    }
+
+    if (method === 'PUT' && path === '/admin/trending') {
+      requireAdmin(event);
+      const body = parseBody(event);
+      const destinations = Array.isArray(body.destinations) ? body.destinations.slice(0, 8) : [];
+      const clean = destinations.map((d) => ({
+        city:    String(d.city || '').slice(0, 80),
+        country: String(d.country || '').slice(0, 80),
+        tag:     String(d.tag || '').slice(0, 80),
+        emoji:   String(d.emoji || '').slice(0, 8),
+      }));
+      await ddb.put({
+        TableName: TABLE_NAME,
+        Item: {
+          PK: 'SETTINGS',
+          SK: 'TRENDING',
+          entityType: 'PlatformSettings',
+          destinations: clean,
+          updatedAt: new Date().toISOString(),
+          updatedBy: getUserId(event) || 'unknown'
+        }
+      }).promise();
+      return ok(200, { destinations: clean });
+    }
+
+    /* ─── Admin: metrics ─── */
+
+    if (method === 'GET' && path === '/admin/metrics') {
+      requireAdmin(event);
+
+      const users = await listAllCognitoUsers();
+      const trips = (await queryAllTripsInGsi()).filter((t) => !t.deleted);
+
+      const nowIso = new Date().toISOString();
+      const today = nowIso.slice(0, 10);
+      const activeTrips = trips.filter((t) => {
+        if (!t.startDate) return false;
+        const start = t.startDate.slice(0, 10);
+        const end   = (t.endDate || t.startDate).slice(0, 10);
+        return start <= today && today <= end;
+      }).length;
+
+      const emailBySub = new Map();
+      for (const u of users) {
+        const sub   = (u.Attributes.find((a) => a.Name === 'sub')   || {}).Value;
+        const email = (u.Attributes.find((a) => a.Name === 'email') || {}).Value;
+        if (sub) emailBySub.set(sub, email || u.Username);
+      }
+
+      const userEvents = users.map((u) => ({
+        type: 'user',
+        when: u.UserCreateDate,
+        message: `New user ${(u.Attributes.find((a) => a.Name === 'email') || {}).Value || u.Username} registered`,
+      }));
+      const tripEvents = trips.map((t) => ({
+        type: 'trip',
+        when: t.createdAt,
+        message: `New trip "${t.title || 'Untitled'}" created`,
+        ownerEmail: emailBySub.get(t.ownerId) || null,
+      }));
+      const recentActivity = [...userEvents, ...tripEvents]
+        .filter((e) => e.when)
+        .sort((a, b) => new Date(b.when) - new Date(a.when))
+        .slice(0, 10);
+
+      return ok(200, {
+        totalUsers: users.length,
+        totalTrips: trips.length,
+        activeTrips,
+        recentActivity,
+      });
+    }
+
+    /* ─── Admin: users ─── */
+
+    if (method === 'GET' && path === '/admin/users') {
+      requireAdmin(event);
+
+      const [users, trips, adminSubs] = await Promise.all([
+        listAllCognitoUsers(),
+        queryAllTripsInGsi(),
+        listAdminGroupSubs(),
+      ]);
+
+      const tripCountByOwner = new Map();
+      for (const t of trips) {
+        if (t.deleted || !t.ownerId) continue;
+        tripCountByOwner.set(t.ownerId, (tripCountByOwner.get(t.ownerId) || 0) + 1);
+      }
+
+      const items = users.map((u) => {
+        const sub   = (u.Attributes.find((a) => a.Name === 'sub')   || {}).Value;
+        const email = (u.Attributes.find((a) => a.Name === 'email') || {}).Value;
+        return {
+          userId: sub,
+          username: u.Username,
+          email: email || u.Username,
+          status: u.UserStatus,
+          enabled: u.Enabled !== false,
+          createdAt: u.UserCreateDate,
+          tripsCount: tripCountByOwner.get(sub) || 0,
+          isAdmin: (sub && adminSubs.has(sub)) || (email && ADMIN_EMAILS.has(email.toLowerCase())) || false,
+        };
+      }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+      return ok(200, { items, count: items.length });
+    }
+
+    if (method === 'POST' && path === '/admin/users/{userId}/suspend') {
+      requireAdmin(event);
+      const targetSub = event.pathParameters && event.pathParameters.userId;
+      const username = await usernameFromSub(targetSub);
+      if (!username) return fail(404, 'NOT_FOUND', 'User not found');
+      await cognito.adminDisableUser({ UserPoolId: USER_POOL_ID, Username: username }).promise();
+      return ok(200, { userId: targetSub, enabled: false });
+    }
+
+    if (method === 'POST' && path === '/admin/users/{userId}/unsuspend') {
+      requireAdmin(event);
+      const targetSub = event.pathParameters && event.pathParameters.userId;
+      const username = await usernameFromSub(targetSub);
+      if (!username) return fail(404, 'NOT_FOUND', 'User not found');
+      await cognito.adminEnableUser({ UserPoolId: USER_POOL_ID, Username: username }).promise();
+      return ok(200, { userId: targetSub, enabled: true });
+    }
+
+    if (method === 'POST' && path === '/admin/users/{userId}/promote') {
+      requireAdmin(event);
+      const targetSub = event.pathParameters && event.pathParameters.userId;
+      const username = await usernameFromSub(targetSub);
+      if (!username) return fail(404, 'NOT_FOUND', 'User not found');
+      await cognito.adminAddUserToGroup({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+        GroupName: ADMIN_GROUP_NAME
+      }).promise();
+      return ok(200, { userId: targetSub, isAdmin: true });
+    }
+
+    if (method === 'POST' && path === '/admin/users/{userId}/demote') {
+      requireAdmin(event);
+      const targetSub = event.pathParameters && event.pathParameters.userId;
+      const adminSubs = await listAdminGroupSubs();
+      if (adminSubs.size <= 1 && adminSubs.has(targetSub)) {
+        return fail(400, 'CANNOT_DEMOTE_LAST_ADMIN', 'Cannot demote the last remaining admin');
+      }
+      const username = await usernameFromSub(targetSub);
+      if (!username) return fail(404, 'NOT_FOUND', 'User not found');
+      await cognito.adminRemoveUserFromGroup({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+        GroupName: ADMIN_GROUP_NAME
+      }).promise();
+      return ok(200, { userId: targetSub, isAdmin: false });
+    }
+
+    if (method === 'DELETE' && path === '/admin/users/{userId}') {
+      requireAdmin(event);
+      const targetSub = event.pathParameters && event.pathParameters.userId;
+      const username = await usernameFromSub(targetSub);
+
+      // Purge their entire USER#sub partition in DynamoDB
+      let lastKey;
+      const keys = [];
+      do {
+        const res = await ddb.query({
+          TableName: TABLE_NAME,
+          KeyConditionExpression: 'PK = :pk',
+          ExpressionAttributeValues: { ':pk': `USER#${targetSub}` },
+          ProjectionExpression: 'PK, SK',
+          ExclusiveStartKey: lastKey
+        }).promise();
+        (res.Items || []).forEach((it) => keys.push({ PK: it.PK, SK: it.SK }));
+        lastKey = res.LastEvaluatedKey;
+      } while (lastKey);
+      if (keys.length > 0) await deleteAll(keys);
+
+      if (username) {
+        try {
+          await cognito.adminDeleteUser({ UserPoolId: USER_POOL_ID, Username: username }).promise();
+        } catch (e) {
+          console.warn('adminDeleteUser failed', e.message);
+        }
+      }
+      return noContent();
+    }
+
+    /* ─── Admin: trip moderation ─── */
+
+    if (method === 'GET' && path === '/admin/trips') {
+      requireAdmin(event);
+      const q = ((event.queryStringParameters || {}).q || '').toLowerCase().trim();
+
+      const [tripsRaw, users] = await Promise.all([
+        queryAllTripsInGsi(),
+        listAllCognitoUsers(),
+      ]);
+
+      const emailBySub = new Map();
+      for (const u of users) {
+        const sub   = (u.Attributes.find((a) => a.Name === 'sub')   || {}).Value;
+        const email = (u.Attributes.find((a) => a.Name === 'email') || {}).Value;
+        if (sub) emailBySub.set(sub, email || u.Username);
+      }
+
+      let trips = tripsRaw.filter((t) => !t.deleted);
+      if (q) {
+        trips = trips.filter((t) => {
+          const inTitle = (t.title || '').toLowerCase().includes(q);
+          const ownerEmail = emailBySub.get(t.ownerId) || '';
+          const inOwner = ownerEmail.toLowerCase().includes(q);
+          return inTitle || inOwner;
+        });
+      }
+
+      const items = trips.map((t) => ({
+        tripId: t.tripId,
+        title: t.title || 'Untitled Trip',
+        ownerId: t.ownerId,
+        ownerEmail: emailBySub.get(t.ownerId) || null,
+        startDate: t.startDate || null,
+        endDate: t.endDate || null,
+        hidden: !!t.hidden,
+        itineraryLength: Array.isArray(t.itinerary) ? t.itinerary.length : 0,
+        itinerary: Array.isArray(t.itinerary) ? t.itinerary : [],
+        createdAt: t.createdAt,
+      })).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+      return ok(200, { items, count: items.length });
+    }
+
+    if (method === 'DELETE' && path === '/admin/trips/{tripId}') {
+      requireAdmin(event);
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
+      const trip = await findTripByIdAnyOwner(tripId);
+      if (!trip) return fail(404, 'NOT_FOUND', 'Trip not found');
+      await ddb.update({
+        TableName: TABLE_NAME,
+        Key: { PK: trip.PK, SK: trip.SK },
+        UpdateExpression: 'SET deleted = :d, updatedAt = :u',
+        ExpressionAttributeValues: { ':d': true, ':u': new Date().toISOString() }
+      }).promise();
+      return noContent();
+    }
+
+    if (method === 'POST' && path === '/admin/trips/{tripId}/hide') {
+      requireAdmin(event);
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
+      const body = parseBody(event);
+      const hidden = body.hidden !== false;
+      const trip = await findTripByIdAnyOwner(tripId);
+      if (!trip) return fail(404, 'NOT_FOUND', 'Trip not found');
+      await ddb.update({
+        TableName: TABLE_NAME,
+        Key: { PK: trip.PK, SK: trip.SK },
+        UpdateExpression: 'SET hidden = :h, updatedAt = :u',
+        ExpressionAttributeValues: { ':h': hidden, ':u': new Date().toISOString() }
+      }).promise();
+      return ok(200, { tripId, hidden });
+    }
+
+    if (method === 'GET' && path === '/user/prefs') {
+      const res = await ddb.get({
+        TableName: TABLE_NAME,
+        Key: { PK: `USER#${userId}`, SK: 'PREFS' },
+      }).promise();
+      return ok(200, res.Item || {});
+    }
+
+    if (method === 'PUT' && path === '/user/prefs') {
+      const body  = parseBody(event);
+      const email = getUserEmail(event);
+      const now   = new Date().toISOString();
+      const item  = {
+        PK:              `USER#${userId}`,
+        SK:              'PREFS',
+        entityType:      'UserPrefs',
+        email,
+        firstName:       typeof body.firstName === 'string' ? body.firstName.trim() : '',
+        lastName:        typeof body.lastName  === 'string' ? body.lastName.trim()  : '',
+        currency:        body.currency  || 'USD',
+        timezone:        body.timezone  || 'America/New_York',
+        language:        body.language  || 'en',
+        notifyTrips:     body.notifyTrips     !== false,
+        notifyMarketing: body.notifyMarketing === true,
+        updatedAt:       now,
+      };
+      await ddb.put({ TableName: TABLE_NAME, Item: item }).promise();
+      return ok(200, item);
     }
 
     return fail(404, 'NOT_FOUND', 'Route not found');
