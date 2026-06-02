@@ -54,6 +54,8 @@ function routeDistance(stops) {
   return total;
 }
 
+
+
 function nearestNeighborOrder(stops) {
   const withCoords = stops.filter((s) => s.lat != null && s.lng != null);
   const withoutCoords = stops.filter((s) => s.lat == null || s.lng == null);

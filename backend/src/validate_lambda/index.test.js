@@ -3,7 +3,8 @@ function loadHandler({ ddb, sns, secrets, fetchImpl }) {
   jest.doMock('aws-sdk', () => ({
     DynamoDB: { DocumentClient: jest.fn(() => ddb) },
     SNS: jest.fn(() => sns),
-    SecretsManager: jest.fn(() => secrets)
+    SecretsManager: jest.fn(() => secrets),
+    Location: jest.fn(() => ({ searchPlaceIndexForPosition: jest.fn(() => promiseResult({ Results: [] })) }))
   }));
   jest.doMock('node-fetch', () => fetchImpl || jest.fn());
   return require('./index').handler;
@@ -19,6 +20,29 @@ function setupEnv() {
   process.env.ALERTS_TOPIC_ARN = 'alerts-topic';
 }
 
+function openMeteoForecast(startIso, pop, weathercode) {
+  const hour = startIso.slice(0, 13) + ':00';
+  const day = startIso.slice(0, 10);
+  return {
+    hourly: {
+      time: [hour],
+      temperature_2m: [22],
+      apparent_temperature: [22],
+      weathercode: [weathercode],
+      windspeed_10m: [12],
+      relativehumidity_2m: [65],
+      precipitation_probability: [Math.round(pop * 100)]
+    },
+    daily: {
+      time: [day],
+      weathercode: [weathercode],
+      temperature_2m_max: [24],
+      temperature_2m_min: [18],
+      precipitation_probability_max: [Math.round(pop * 100)]
+    }
+  };
+}
+
 describe('validate_lambda', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -26,21 +50,24 @@ describe('validate_lambda', () => {
   });
 
   test('publishes alert when forecast predicts rain for outdoor slot', async () => {
+    const start = new Date().toISOString();
     const trip = {
       PK: 'USER#u-1',
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
       title: 'Rainy Trip',
-      itinerary: [{ slotId: 's-1', start: new Date().toISOString(), coords: { lat: 32.08, lng: 34.78 } }]
+      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }]
     };
     const ddb = {
       query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({}))
+      get: jest.fn(() => promiseResult({})),
+      batchWrite: jest.fn(() => promiseResult({})),
+      put: jest.fn(() => promiseResult({}))
     };
     const sns = { publish: jest.fn(() => promiseResult({})) };
     const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
-    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ hourly: [{ dt: Math.floor(Date.now() / 1000), pop: 0.8, weather: [{ main: 'Rain' }] }] }) });
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.8, 61) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
     const res = await handler({});
@@ -51,20 +78,23 @@ describe('validate_lambda', () => {
   });
 
   test('does not publish alert for clear weather', async () => {
+    const start = new Date().toISOString();
     const trip = {
       PK: 'USER#u-1',
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
-      itinerary: [{ slotId: 's-1', start: new Date().toISOString(), coords: { lat: 32.08, lng: 34.78 } }]
+      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }]
     };
     const ddb = {
       query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({}))
+      get: jest.fn(() => promiseResult({})),
+      batchWrite: jest.fn(() => promiseResult({})),
+      put: jest.fn(() => promiseResult({}))
     };
     const sns = { publish: jest.fn(() => promiseResult({})) };
     const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
-    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ hourly: [{ dt: Math.floor(Date.now() / 1000), pop: 0.1, weather: [{ main: 'Clear' }] }] }) });
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.1, 0) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
     const res = await handler({});
@@ -84,7 +114,9 @@ describe('validate_lambda', () => {
     };
     const ddb = {
       query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({}))
+      get: jest.fn(() => promiseResult({})),
+      batchWrite: jest.fn(() => promiseResult({})),
+      put: jest.fn(() => promiseResult({}))
     };
     const sns = { publish: jest.fn(() => promiseResult({})) };
     const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
@@ -99,7 +131,7 @@ describe('validate_lambda', () => {
   });
 
   test('missing configuration returns controlled error', async () => {
-    delete process.env.OPENWEATHER_SECRET_ARN;
+    delete process.env.TABLE_NAME;
     const handler = loadHandler({
       ddb: {},
       sns: {},

@@ -177,7 +177,7 @@ function TripCard({ trip, localImage, isMenuOpen, onToggleMenu, onView, onDelete
           {formatDateRange(trip.startDate, trip.endDate)}
         </div>
         <button className="tc-view-btn" onClick={(e) => { e.stopPropagation(); onView(); }}>
-          View Itinerary →
+          Open Overview →
         </button>
       </div>
     </div>
@@ -384,7 +384,7 @@ export default function TripsPage() {
                   localImage={localImages[trip.tripId] || null}
                   isMenuOpen={activeMenuId === trip.tripId}
                   onToggleMenu={() => setActiveMenuId((v) => v === trip.tripId ? null : trip.tripId)}
-                  onView={() => navigate(`/trips/${trip.tripId}`)}
+                  onView={() => navigate(`/trips/${trip.tripId}/overview`)}
                   onDelete={deleteTrip}
                   onRename={() => startRename(trip)}
                   onChangeImage={() => setChangingImageForId(trip.tripId)}

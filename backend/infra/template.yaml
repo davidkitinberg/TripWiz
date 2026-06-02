@@ -142,6 +142,32 @@ Resources:
         gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
         gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
 
+  TripWizDocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods:
+              - PUT
+              - GET
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            AllowedHeaders:
+              - '*'
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+
   TripRestFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -161,9 +187,17 @@ Resources:
           ROUTE_CALCULATOR_NAME: !Ref TripWizRouteCalculator
           WS_ENDPOINT: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
           ADMIN_EMAILS: !Ref AdminBootstrapEmails
+          DOCUMENTS_BUCKET: !Ref TripWizDocumentsBucket
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TripWizTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub "${TripWizDocumentsBucket.Arn}/trip-documents/*"
         - Statement:
             Effect: Allow
             Action:
@@ -239,6 +273,36 @@ Resources:
           Properties:
             RestApiId: !Ref TripWizApi
             Path: /trips/{tripId}
+            Method: DELETE
+        ListTripAttachments:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments
+            Method: GET
+        CreateTripAttachmentUploadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments/upload-url
+            Method: POST
+        CompleteTripAttachmentUpload:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments/{fileId}/complete
+            Method: POST
+        GetTripAttachmentDownloadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments/{fileId}/download-url
+            Method: GET
+        DeleteTripAttachment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments/{fileId}
             Method: DELETE
         ValidateTrip:
           Type: Api

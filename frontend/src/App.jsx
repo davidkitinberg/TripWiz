@@ -5,6 +5,7 @@ import HomePage from './pages/HomePage';
 import LoginPage from './pages/LoginPage';
 import TripsPage from './pages/TripsPage';
 import TripPage from './pages/TripPage';
+import TripOverviewPage from './pages/TripOverviewPage';
 import AccountSettings from './pages/AccountSettings';
 import AdminLoginPage from './pages/AdminLoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
@@ -44,6 +45,14 @@ export default function App() {
           element={
             <PrivateRoute>
               <TripsPage />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/trips/:tripId/overview"
+          element={
+            <PrivateRoute>
+              <TripOverviewPage />
             </PrivateRoute>
           }
         />

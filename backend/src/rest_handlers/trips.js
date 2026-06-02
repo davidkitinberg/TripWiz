@@ -7,6 +7,7 @@ const secrets = new AWS.SecretsManager();
 const cognito = new AWS.CognitoIdentityServiceProvider();
 const bedrock = new AWS.BedrockRuntime();
 const location = new AWS.Location();
+const s3 = new AWS.S3();
 
 const TABLE_NAME = process.env.TABLE_NAME;
 const VALIDATE_FUNCTION_NAME = process.env.VALIDATE_FUNCTION_NAME;
@@ -16,6 +17,16 @@ const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-ha
 const PLACE_INDEX_NAME = process.env.PLACE_INDEX_NAME || 'TripWizPlaceIndex';
 const ROUTE_CALCULATOR_NAME = process.env.ROUTE_CALCULATOR_NAME || 'TripWizRouteCalculator';
 const WS_ENDPOINT = process.env.WS_ENDPOINT;
+const DOCUMENTS_BUCKET = process.env.DOCUMENTS_BUCKET;
+const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+const ALLOWED_ATTACHMENT_TYPES = new Map([
+  ['application/pdf', ['pdf']],
+  ['image/png', ['png']],
+  ['image/jpeg', ['jpg', 'jpeg']],
+  ['image/webp', ['webp']],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', ['docx']]
+]);
+const ALLOWED_RELATED_ITEM_TYPES = new Set(['flight', 'accommodation', 'rentalCar', 'general']);
 
 const uuid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const ok = (statusCode, body) => ({ statusCode, headers: corsHeaders(), body: body === undefined ? '' : JSON.stringify(body) });
@@ -250,6 +261,113 @@ async function resolveTripForUser(userId, tripId) {
 function publicTrip(item) {
   const { PK, SK, GSI1PK, tripStart, ...rest } = item;
   return rest;
+}
+
+function safeFileName(name) {
+  const raw = String(name || 'document').trim();
+  const cleaned = raw
+    .replace(/[\\/:*?"<>|#%{}^~[\]`]/g, '-')
+    .replace(/\s+/g, ' ')
+    .slice(0, 140)
+    .trim();
+  return cleaned || 'document';
+}
+
+function fileExtension(name) {
+  const match = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match ? match[1] : '';
+}
+
+function inferAttachmentType(fileName, fileType) {
+  const explicit = String(fileType || '').toLowerCase().trim();
+  if (explicit) return explicit;
+  const ext = fileExtension(fileName);
+  if (ext === 'pdf') return 'application/pdf';
+  if (ext === 'png') return 'image/png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  return '';
+}
+
+function validateAttachmentInput(input) {
+  const fileName = safeFileName(input.fileName);
+  const fileType = inferAttachmentType(fileName, input.fileType);
+  const fileSize = Number(input.fileSize);
+  const relatedItemType = String(input.relatedItemType || 'general').trim();
+  const relatedItemId = input.relatedItemId ? String(input.relatedItemId).trim() : null;
+  const extension = fileExtension(fileName);
+
+  if (!fileName) {
+    const e = new Error('fileName is required');
+    e.statusCode = 400;
+    e.code = 'INVALID_FILE';
+    throw e;
+  }
+  if (!Number.isFinite(fileSize) || fileSize <= 0 || fileSize > MAX_ATTACHMENT_SIZE_BYTES) {
+    const e = new Error('File must be 10 MB or smaller');
+    e.statusCode = 400;
+    e.code = 'FILE_TOO_LARGE';
+    throw e;
+  }
+  if (!ALLOWED_ATTACHMENT_TYPES.has(fileType) || !ALLOWED_ATTACHMENT_TYPES.get(fileType).includes(extension)) {
+    const e = new Error('Unsupported file type. Use PDF, PNG, JPG, JPEG, WEBP, or DOCX.');
+    e.statusCode = 400;
+    e.code = 'UNSUPPORTED_FILE_TYPE';
+    throw e;
+  }
+  if (!ALLOWED_RELATED_ITEM_TYPES.has(relatedItemType)) {
+    const e = new Error('relatedItemType must be flight, accommodation, rentalCar, or general');
+    e.statusCode = 400;
+    e.code = 'INVALID_RELATED_ITEM';
+    throw e;
+  }
+  if (relatedItemType !== 'general' && !relatedItemId) {
+    const e = new Error('relatedItemId is required for item-specific attachments');
+    e.statusCode = 400;
+    e.code = 'RELATED_ITEM_REQUIRED';
+    throw e;
+  }
+
+  return { fileName, fileType, fileSize, relatedItemType, relatedItemId };
+}
+
+function publicAttachment(item) {
+  if (!item) return null;
+  const { PK, SK, ownerId, ...rest } = item;
+  return rest;
+}
+
+async function requireTripAccess(userId, tripId, edit = false) {
+  const resolved = await resolveTripForUser(userId, tripId);
+  if (!resolved) {
+    const e = new Error('Trip not found');
+    e.statusCode = 404;
+    e.code = 'NOT_FOUND';
+    throw e;
+  }
+  if (edit && !['owner', 'editor'].includes(resolved.access.role)) {
+    const e = new Error('You cannot edit this trip');
+    e.statusCode = 403;
+    e.code = 'FORBIDDEN';
+    throw e;
+  }
+  return resolved;
+}
+
+async function getAttachmentForTrip(userId, tripId, fileId, edit = false) {
+  await requireTripAccess(userId, tripId, edit);
+  const res = await ddb.get({
+    TableName: TABLE_NAME,
+    Key: { PK: `TRIP#${tripId}`, SK: `ATTACHMENT#${fileId}` }
+  }).promise();
+  if (!res.Item || res.Item.status !== 'uploaded') {
+    const e = new Error('Attachment not found');
+    e.statusCode = 404;
+    e.code = 'NOT_FOUND';
+    throw e;
+  }
+  return res.Item;
 }
 
 async function writeAccessRecords(trip, collaborators) {
@@ -667,6 +785,125 @@ exports.handler = async (event) => {
       const resolved = await resolveTripForUser(userId, tripId);
       if (!resolved) return fail(404, 'NOT_FOUND', 'Trip not found');
       return ok(200, { trip: publicTrip(resolved.trip), access: resolved.access.role });
+    }
+
+    if (method === 'GET' && path === '/trips/{tripId}/attachments') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
+      await requireTripAccess(userId, tripId, false);
+      const res = await ddb.query({
+        TableName: TABLE_NAME,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
+        FilterExpression: '#status = :uploaded',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':pk': `TRIP#${tripId}`,
+          ':skp': 'ATTACHMENT#',
+          ':uploaded': 'uploaded'
+        }
+      }).promise();
+      const items = (res.Items || [])
+        .map(publicAttachment)
+        .sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')));
+      return ok(200, { items });
+    }
+
+    if (method === 'POST' && path === '/trips/{tripId}/attachments/upload-url') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
+      if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
+      const resolved = await requireTripAccess(userId, tripId, true);
+      const input = validateAttachmentInput(parseBody(event));
+      const fileId = `f-${uuid()}`;
+      const s3Key = `trip-documents/${resolved.trip.ownerId}/${tripId}/${fileId}/${input.fileName}`;
+      const uploadUrl = await s3.getSignedUrlPromise('putObject', {
+        Bucket: DOCUMENTS_BUCKET,
+        Key: s3Key,
+        ContentType: input.fileType,
+        Expires: 300,
+      });
+      return ok(200, { fileId, s3Key, uploadUrl, expiresIn: 300 });
+    }
+
+    if (method === 'POST' && path === '/trips/{tripId}/attachments/{fileId}/complete') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      const fileId = event.pathParameters && event.pathParameters.fileId;
+      if (!tripId || !fileId) return fail(400, 'BAD_REQUEST', 'tripId and fileId are required');
+      if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
+      const resolved = await requireTripAccess(userId, tripId, true);
+      const body = parseBody(event);
+      const input = validateAttachmentInput(body);
+      const s3Key = String(body.s3Key || '');
+      const expectedPrefix = `trip-documents/${resolved.trip.ownerId}/${tripId}/${fileId}/`;
+      if (!s3Key.startsWith(expectedPrefix)) return fail(400, 'INVALID_S3_KEY', 'Invalid attachment key');
+
+      let head;
+      try {
+        head = await s3.headObject({ Bucket: DOCUMENTS_BUCKET, Key: s3Key }).promise();
+      } catch (err) {
+        return fail(400, 'UPLOAD_NOT_FOUND', 'Uploaded file was not found in storage');
+      }
+      if (Number(head.ContentLength || 0) !== input.fileSize) {
+        return fail(400, 'UPLOAD_SIZE_MISMATCH', 'Uploaded file size does not match the requested file');
+      }
+
+      const now = new Date().toISOString();
+      const item = {
+        PK: `TRIP#${tripId}`,
+        SK: `ATTACHMENT#${fileId}`,
+        entityType: 'TripAttachment',
+        fileId,
+        tripId,
+        ownerId: resolved.trip.ownerId,
+        fileName: input.fileName,
+        fileType: input.fileType,
+        fileSize: input.fileSize,
+        uploadedAt: now,
+        uploadedBy: userId,
+        s3Key,
+        relatedItemType: input.relatedItemType,
+        relatedItemId: input.relatedItemId,
+        status: 'uploaded'
+      };
+      await ddb.put({
+        TableName: TABLE_NAME,
+        Item: item,
+        ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)'
+      }).promise();
+      return ok(201, { attachment: publicAttachment(item) });
+    }
+
+    if (method === 'GET' && path === '/trips/{tripId}/attachments/{fileId}/download-url') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      const fileId = event.pathParameters && event.pathParameters.fileId;
+      if (!tripId || !fileId) return fail(400, 'BAD_REQUEST', 'tripId and fileId are required');
+      if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
+      const attachment = await getAttachmentForTrip(userId, tripId, fileId, false);
+      const downloadUrl = await s3.getSignedUrlPromise('getObject', {
+        Bucket: DOCUMENTS_BUCKET,
+        Key: attachment.s3Key,
+        Expires: 300,
+        ResponseContentDisposition: `inline; filename="${safeFileName(attachment.fileName)}"`
+      });
+      return ok(200, { downloadUrl, expiresIn: 300 });
+    }
+
+    if (method === 'DELETE' && path === '/trips/{tripId}/attachments/{fileId}') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      const fileId = event.pathParameters && event.pathParameters.fileId;
+      if (!tripId || !fileId) return fail(400, 'BAD_REQUEST', 'tripId and fileId are required');
+      if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
+      const attachment = await getAttachmentForTrip(userId, tripId, fileId, true);
+      try {
+        await s3.deleteObject({ Bucket: DOCUMENTS_BUCKET, Key: attachment.s3Key }).promise();
+      } catch (err) {
+        if (err.code !== 'NoSuchKey' && err.code !== 'NotFound') throw err;
+      }
+      await ddb.delete({
+        TableName: TABLE_NAME,
+        Key: { PK: `TRIP#${tripId}`, SK: `ATTACHMENT#${fileId}` }
+      }).promise();
+      return noContent();
     }
 
     if (method === 'PUT' && path === '/trips/{tripId}') {

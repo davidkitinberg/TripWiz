@@ -6,25 +6,34 @@ function promiseReject(error) {
   return { promise: jest.fn().mockRejectedValue(error) };
 }
 
-function loadHandler({ ddb, lambda, secrets, fetchImpl }) {
+function loadHandler({ ddb, lambda, secrets, s3, fetchImpl }) {
   jest.resetModules();
   jest.doMock('aws-sdk', () => ({
     DynamoDB: { DocumentClient: jest.fn(() => ddb) },
     Lambda: jest.fn(() => lambda || { invoke: jest.fn(() => promiseResult({})) }),
-    SecretsManager: jest.fn(() => secrets || { getSecretValue: jest.fn(() => promiseResult({ SecretString: '{}' })) })
+    SecretsManager: jest.fn(() => secrets || { getSecretValue: jest.fn(() => promiseResult({ SecretString: '{}' })) }),
+    CognitoIdentityServiceProvider: jest.fn(() => ({ listUsers: jest.fn(() => promiseResult({ Users: [] })) })),
+    BedrockRuntime: jest.fn(() => ({ invokeModel: jest.fn(() => promiseResult({ body: Buffer.from('{}') })) })),
+    Location: jest.fn(() => ({ searchPlaceIndexForText: jest.fn(() => promiseResult({ Results: [] })), calculateRoute: jest.fn(() => promiseResult({})) })),
+    S3: jest.fn(() => s3 || {
+      getSignedUrlPromise: jest.fn(() => Promise.resolve('https://signed.example/upload')),
+      headObject: jest.fn(() => promiseResult({ ContentLength: 1 })),
+      deleteObject: jest.fn(() => promiseResult({}))
+    })
   }));
   jest.doMock('node-fetch', () => fetchImpl || jest.fn());
   process.env.TABLE_NAME = 'TripWizTable';
   process.env.VALIDATE_FUNCTION_NAME = 'TripWiz-Validate';
   process.env.MAPPING_SECRET_ARN = 'mapping-secret';
+  process.env.DOCUMENTS_BUCKET = 'tripwiz-documents';
   return require('./trips').handler;
 }
 
-function event({ method, resource, userId, tripId, body }) {
+function event({ method, resource, userId, tripId, fileId, body }) {
   return {
     httpMethod: method,
     resource,
-    pathParameters: tripId ? { tripId } : undefined,
+    pathParameters: tripId ? { tripId, ...(fileId ? { fileId } : {}) } : undefined,
     body: body === undefined ? undefined : JSON.stringify(body),
     requestContext: {
       authorizer: userId ? { claims: { sub: userId } } : undefined
@@ -99,5 +108,62 @@ describe('rest trip handler', () => {
 
     expect(res.statusCode).toBe(409);
     expect(JSON.parse(res.body).error.code).toBe('VERSION_CONFLICT');
+  });
+
+  test('attachment upload URL rejects unsupported file types before S3 signing', async () => {
+    const s3 = { getSignedUrlPromise: jest.fn() };
+    const ddb = {
+      get: jest.fn(() => promiseResult({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', version: 1 } }))
+    };
+    const handler = loadHandler({ ddb, s3 });
+
+    const res = await handler(event({
+      method: 'POST',
+      resource: '/trips/{tripId}/attachments/upload-url',
+      userId: 'u-1',
+      tripId: 't-1',
+      body: {
+        fileName: 'ticket.exe',
+        fileType: 'application/x-msdownload',
+        fileSize: 100,
+        relatedItemType: 'flight',
+        relatedItemId: 'flight-1'
+      }
+    }));
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error.code).toBe('UNSUPPORTED_FILE_TYPE');
+    expect(s3.getSignedUrlPromise).not.toHaveBeenCalled();
+  });
+
+  test('attachment complete does not create metadata when S3 upload is missing', async () => {
+    const s3 = {
+      headObject: jest.fn(() => promiseReject(Object.assign(new Error('missing'), { code: 'NotFound' })))
+    };
+    const ddb = {
+      get: jest.fn(() => promiseResult({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', version: 1 } })),
+      put: jest.fn()
+    };
+    const handler = loadHandler({ ddb, s3 });
+
+    const res = await handler(event({
+      method: 'POST',
+      resource: '/trips/{tripId}/attachments/{fileId}/complete',
+      userId: 'u-1',
+      tripId: 't-1',
+      fileId: 'f-1',
+      body: {
+        fileName: 'ticket.pdf',
+        fileType: 'application/pdf',
+        fileSize: 100,
+        s3Key: 'trip-documents/u-1/t-1/f-1/ticket.pdf',
+        relatedItemType: 'flight',
+        relatedItemId: 'flight-1'
+      }
+    }));
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error.code).toBe('UPLOAD_NOT_FOUND');
+    expect(ddb.put).not.toHaveBeenCalled();
   });
 });

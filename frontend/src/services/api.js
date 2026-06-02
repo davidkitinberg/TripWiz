@@ -26,6 +26,36 @@ async function request(method, path, body) {
   return data;
 }
 
+async function uploadToSignedUrl(uploadUrl, file) {
+  const fallbackTypeByExtension = {
+    pdf: 'application/pdf',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  };
+  const extension = String(file.name || '').toLowerCase().split('.').pop();
+  const contentType = file.type || fallbackTypeByExtension[extension] || 'application/octet-stream';
+  try {
+    const res = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': contentType,
+      },
+      body: file,
+    });
+    if (!res.ok) {
+      throw new Error(`S3 upload failed with HTTP ${res.status}`);
+    }
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error('S3 upload failed before a response was received. Check the documents bucket CORS configuration and redeploy the backend stack.');
+    }
+    throw err;
+  }
+}
+
 export const api = {
   getTrips: () => request('GET', '/trips'),
   createTrip: (data) => request('POST', '/trips', data),
@@ -36,6 +66,12 @@ export const api = {
   getTripAlerts: (tripId) => request('GET', `/trips/${tripId}/alerts`),
   getTripFallbacks: (tripId) => request('GET', `/trips/${tripId}/fallbacks`),
   getTripWeather: (tripId) => request('GET', `/trips/${tripId}/weather`),
+  getTripAttachments: (tripId) => request('GET', `/trips/${tripId}/attachments`),
+  createAttachmentUploadUrl: (tripId, data) => request('POST', `/trips/${tripId}/attachments/upload-url`, data),
+  completeAttachmentUpload: (tripId, fileId, data) => request('POST', `/trips/${tripId}/attachments/${fileId}/complete`, data),
+  getAttachmentDownloadUrl: (tripId, fileId) => request('GET', `/trips/${tripId}/attachments/${fileId}/download-url`),
+  deleteAttachment: (tripId, fileId) => request('DELETE', `/trips/${tripId}/attachments/${fileId}`),
+  uploadToSignedUrl,
   getTripCollaborators: (tripId) => request('GET', `/trips/${tripId}/collaborators`),
   inviteCollaborator: (tripId, email) => request('POST', `/trips/${tripId}/invite`, { email }),
   removeCollaborator: (tripId, userId) => request('DELETE', `/trips/${tripId}/invite/${userId}`),
