@@ -18,3 +18,19 @@ out/
 *.suo
 *.ntvs*
 *.njsproj
+
+# Local Codex/tooling state
+.codex/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Downloaded/generated source data used by local conversion tools
+tools/data/
+
+# Accidental nested package artifacts
+frontend/backend/
+
+# Root npm artifact when installing from the repository root by mistake
+/package-lock.json
