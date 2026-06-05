@@ -107,6 +107,7 @@ function loadLocalImages() {
   }
 }
 
+// [Feature #39] Fetch destination hero imagery from Wikipedia
 async function fetchWikiThumbnail(query) {
   if (!query) return null;
   const params = new URLSearchParams({
@@ -248,6 +249,7 @@ function deriveAccommodationFromStop(stop, trip) {
   };
 }
 
+// [Feature #33] Auto-derive likely accommodations from hotel-like itinerary stops
 function deriveAccommodationsFromItinerary(itinerary = [], trip = null) {
   return itinerary
     .map((stop) => deriveAccommodationFromStop(stop, trip))
@@ -434,6 +436,7 @@ function dayLabel(trip, dayIndex) {
   return `Day ${dayIndex + 1} · ${label}`;
 }
 
+// [Feature #31] Reservations overview summary rows (counts of stops/flights/stays/etc.)
 function buildOverviewRows(trip, dashboard, totalAttachments = dashboard?.attachments?.length || 0) {
   return [
     ['Trip name', trip?.title || 'Untitled Trip'],
@@ -723,6 +726,7 @@ function parseFlightSuggestion(r, countryName = '') {
   };
 }
 
+// [Feature #32] Flight airport autocomplete over the bundled 6k+ airport database
 async function searchFlightSuggestions(query) {
   const normalized = normalizeSearchText(query);
   if (normalized.length < 1) return [];
@@ -1051,6 +1055,7 @@ export default function TripOverviewPage() {
   useEffect(() => {
     let cancelled = false;
 
+    // [Feature #39] Build the rotating hero image set (custom cover + Wikipedia photos)
     async function loadHeroImages() {
       if (!trip) return;
       const terms = buildHeroSearchTerms(trip, dashboard);
@@ -1169,6 +1174,7 @@ export default function TripOverviewPage() {
     updateDashboard((current) => ({ ...current, stopNotes: nextStopNotes }));
   }
 
+  // [Feature #36] Save trip-level free-text notes
   function saveGeneralNotes() {
     updateDashboard((current) => ({ ...current, tripNotes: generalNotesDraft }));
   }
@@ -1185,6 +1191,7 @@ export default function TripOverviewPage() {
     });
   }
 
+  // [Feature #35] Upload a trip document: presigned S3 PUT, then confirm metadata
   async function uploadAttachment(file, relatedItemType = 'general', relatedItemId = null) {
     const validationError = validateAttachmentFile(file);
     const statusKey = `${relatedItemType}:${relatedItemId || 'general'}:upload`;
@@ -1270,6 +1277,7 @@ export default function TripOverviewPage() {
     setRentalCarModal(rentalCar);
   }
 
+  // [Feature #32] Create/update a flight reservation
   function saveFlightFlight(draft) {
     const flights = [...dashboard.flights];
     const index = flights.findIndex((flight) => flight.id === draft.id);
@@ -1279,6 +1287,7 @@ export default function TripOverviewPage() {
     setFlightModal(null);
   }
 
+  // [Feature #33] Create/update an accommodation reservation
   function saveStayDraft(draft) {
     const accommodations = [...dashboard.accommodations];
     const index = accommodations.findIndex((stay) => stay.id === draft.id);
@@ -1288,6 +1297,7 @@ export default function TripOverviewPage() {
     setStayModal(null);
   }
 
+  // [Feature #34] Create/update a rental car reservation
   function saveRentalCarDraft(draft) {
     const rentalCars = [...dashboard.rentalCars];
     const index = rentalCars.findIndex((car) => car.id === draft.id);
@@ -1309,6 +1319,7 @@ export default function TripOverviewPage() {
     updateRentalCars(dashboard.rentalCars.filter((car) => car.id !== rentalCarId));
   }
 
+  // [Feature #37] Packing list — add a category
   function addCategory() {
     const name = newCategoryName.trim();
     if (!name) return;
@@ -1319,6 +1330,7 @@ export default function TripOverviewPage() {
     setSelectedPackingCategoryId(nextCategory.id);
   }
 
+  // [Feature #37] Packing list — add / check / remove items within a category
   function addPackingItem(categoryId) {
     const label = (categoryItemDrafts[categoryId] || '').trim();
     if (!label) return;
@@ -1380,6 +1392,7 @@ export default function TripOverviewPage() {
     setPackingEdit(null);
   }
 
+  // [Feature #36] Save a per-stop note
   function saveStopNote(slotId) {
     updateStopNotes({ ...dashboard.stopNotes, [slotId]: noteDrafts[slotId] || '' });
   }
@@ -1407,6 +1420,7 @@ export default function TripOverviewPage() {
     return XLSX.utils.aoa_to_sheet(rows);
   }
 
+  // [Feature #38] Export the selected sections as a multi-sheet Excel workbook (XLSX)
   function exportExcel() {
     const workbook = XLSX.utils.book_new();
     const selected = exportSelection;
@@ -1516,6 +1530,7 @@ export default function TripOverviewPage() {
     XLSX.writeFile(workbook, `${trip?.title || 'TripWiz'}-overview.xlsx`);
   }
 
+  // [Feature #38] Export the selected sections as a styled multi-section PDF (jsPDF)
   function exportPdf() {
     const doc = new jsPDF({ unit: 'pt', format: 'a4' });
     const margin = 40;

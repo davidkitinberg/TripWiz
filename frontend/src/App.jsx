@@ -16,6 +16,7 @@ import AdminUsersPage from './pages/AdminUsersPage';
 import AdminTripsPage from './pages/AdminTripsPage';
 import AdminTrendingPage from './pages/AdminTrendingPage';
 
+// [Feature #4] Protected routes — redirect to /login unless a valid session exists
 function PrivateRoute({ children }) {
   const [auth, setAuth] = useState(null);
   const location = useLocation();

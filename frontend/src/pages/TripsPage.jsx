@@ -57,6 +57,7 @@ function saveLocalImages(map) {
 }
 
 // Fetch representative destination photo from Wikipedia (free, no key, CORS)
+// [Feature #12] Auto cover image — representative destination photo from Wikipedia
 async function fetchWikiImage(title) {
   const query = (title || '').split(/\s+/).slice(0, 2).join(' ');
   if (!query) return null;
@@ -70,6 +71,7 @@ async function fetchWikiImage(title) {
 
 /* ─── Image drop-zone component ─────────────────────────── */
 
+// [Feature #12] Custom trip cover image — drag & drop / browse upload
 function ImageDropZone({ onFile }) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef(null);
@@ -209,12 +211,14 @@ export default function TripsPage() {
 
   const [trending, setTrending] = useState(INSPIRATION);
 
+  // [Feature #14] Load admin-curated trending destinations (with built-in fallback)
   useEffect(() => {
     api.getTrending()
       .then((res) => { if (Array.isArray(res.destinations) && res.destinations.length > 0) setTrending(res.destinations); })
       .catch(() => { /* keep fallback */ });
   }, []);
 
+  // [Feature #10] Load the signed-in user's trips for the "My Trips" dashboard
   useEffect(() => {
     api.getTrips()
       .then((res) => setTrips(res.items || []))
@@ -243,6 +247,7 @@ export default function TripsPage() {
     setShowCreate(true);
   }
 
+  // [Feature #9] Create a new trip and open its planner
   async function createTrip(e) {
     e.preventDefault();
     setCreating(true); setError('');
@@ -252,6 +257,7 @@ export default function TripsPage() {
     } catch (err) { setError(err.message); setCreating(false); }
   }
 
+  // [Feature #13] Delete a trip (backend soft-deletes; also drops its local cover image)
   async function deleteTrip(tripId) {
     if (!window.confirm('Delete this trip? This cannot be undone.')) return;
     try {
@@ -266,6 +272,7 @@ export default function TripsPage() {
 
   function startRename(trip) { setRenamingTrip(trip); setRenameDraft(trip.title || ''); }
 
+  // [Feature #11] Rename a trip (optimistic update + PUT /trips)
   async function submitRename(e) {
     e.preventDefault();
     if (!renamingTrip || !renameDraft.trim()) return;

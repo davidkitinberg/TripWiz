@@ -1,6 +1,7 @@
 import config from '../config';
 import { getIdToken } from './auth';
 
+// [Feature #4] Every API call carries the Cognito JWT ID token for authorization
 async function request(method, path, body) {
   const token = await getIdToken();
   const headers = { 'Content-Type': 'application/json' };
@@ -26,6 +27,7 @@ async function request(method, path, body) {
   return data;
 }
 
+// [Feature #35] Browser uploads a trip document straight to S3 via a presigned PUT URL
 async function uploadToSignedUrl(uploadUrl, file) {
   const fallbackTypeByExtension = {
     pdf: 'application/pdf',

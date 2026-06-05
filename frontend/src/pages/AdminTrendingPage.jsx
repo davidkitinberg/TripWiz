@@ -4,6 +4,7 @@ import { api } from '../services/api';
 
 const EMPTY = { city: '', country: '', tag: '', emoji: '🌍' };
 
+// [Feature #50] Manage trending destinations shown on every user's dashboard (#14)
 export default function AdminTrendingPage() {
   const [destinations, setDestinations] = useState([]);
   const [loading, setLoading] = useState(true);

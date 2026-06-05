@@ -148,6 +148,7 @@ function findForecastForTimestamp(forecast, timestampSec) {
 // ─── Activity categorisation ──────────────────────────────────────────────────
 // Priority: explicit indoor flag → SKI → BEACH → keyword INDOOR → GENERAL_OUTDOOR
 
+// [Feature #23] Categorize a stop's activity (SKI / BEACH / INDOOR / GENERAL_OUTDOOR)
 function categorizeActivity(slot, item) {
   if (slot.indoor === true || (item && item.indoor === true)) return 'INDOOR';
 
@@ -170,6 +171,7 @@ function categorizeActivity(slot, item) {
 
 function toF(c) { return Math.round(c * 9 / 5 + 32); }
 
+// [Feature #23] Context-aware weather assessment using category-specific thresholds
 function assessWeather(fw, category) {
   if (category === 'INDOOR') return { isAlert: false, reason: null };
 
@@ -295,6 +297,7 @@ async function getOnDemandTrip(detail) {
   return ownerTrip.Item || null;
 }
 
+// [Feature #25] Scheduled validation — find trips starting soon (EventBridge-driven)
 async function getScheduledTrips() {
   const now      = new Date();
   const tomorrow = new Date(now.getTime() + 24 * 3600 * 1000);
@@ -321,6 +324,7 @@ async function getTrips(event) {
 
 // ─── Per-slot weather assessment ──────────────────────────────────────────────
 
+// [Feature #23] Fetch + assess the forecast for a single scheduled stop
 async function getWeatherForSlot(trip, slot) {
   if (!slot || !slot.start) return null;
 
@@ -388,6 +392,7 @@ async function clearValidationData(tripId) {
   }
 }
 
+// [Feature #24] Find nearby indoor fallback venues via Amazon Location Service
 async function findFallbacks(coords, max = 5) {
   if (!PLACE_INDEX_NAME || !coords || coords.lat == null || coords.lng == null) return [];
   const seen        = new Set();
@@ -527,6 +532,8 @@ async function persistValidationMeta(tripId) {
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
+// [Feature #22] On-demand (REST-triggered) and [Feature #25] scheduled weather validation.
+// For each stop: assess weather (#23), persist alerts/fallbacks (#24), email via SNS (#41).
 exports.handler = async (event) => {
   console.log('Validation Lambda invoked', JSON.stringify(event));
 
@@ -557,6 +564,7 @@ exports.handler = async (event) => {
           if (wd.isAlert) {
             alertsPublished++;
             await persistAlert(wd, trip.tripId);
+            // [Feature #41] Publish the alert to SNS (fans out to the SES emailer)
             await sns.publish({
               TopicArn: ALERTS_TOPIC_ARN,
               Message:  JSON.stringify(wd),

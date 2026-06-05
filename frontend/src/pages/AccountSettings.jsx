@@ -91,6 +91,7 @@ export default function AccountSettings() {
     localStorage.setItem(PREFS_KEY, JSON.stringify(next));
   }
 
+  // [Feature #5] Save profile details (name + avatar) locally and to DynamoDB prefs
   function saveProfile() {
     persistPrefs(prefs);
     api.saveUserPrefs(prefs).catch(() => {});
@@ -98,6 +99,7 @@ export default function AccountSettings() {
     setTimeout(() => setProfileSaved(false), 2500);
   }
 
+  // [Feature #6] Save regional & travel preferences (currency, timezone, language)
   function savePreferences() {
     persistPrefs(prefs);
     api.saveUserPrefs(prefs).catch(() => {});
@@ -116,6 +118,7 @@ export default function AccountSettings() {
     reader.readAsDataURL(file);
   }
 
+  // [Feature #7] Toggle notification preferences; synced to DynamoDB for the reminder Lambda
   function toggleNotif(key) {
     const next = { ...prefs, [key]: !prefs[key] };
     setPrefs(next);
@@ -123,6 +126,7 @@ export default function AccountSettings() {
     api.saveUserPrefs(next).catch(() => {});
   }
 
+  // [Feature #8] Self-service account deletion (type-to-confirm, then sign out)
   function handleDeleteAccount() {
     if (deleteConfirm.toLowerCase() !== 'delete') return;
     signOut();

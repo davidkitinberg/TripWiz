@@ -115,6 +115,8 @@ function buildEmailHtml(trip, alerts, prefs) {
 </html>`;
 }
 
+// [Feature #40] Daily trip reminder emails — for trips starting within REMINDER_DAYS,
+// respect each owner's notifyTrips preference and send a branded HTML email via SES.
 exports.handler = async () => {
   console.log('TripReminder Lambda invoked', { REMINDER_DAYS });
 

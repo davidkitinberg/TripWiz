@@ -49,6 +49,7 @@ export default function AdminUsersPage() {
     }
   }
 
+  // [Feature #44] Suspend / unsuspend a user (disable/enable their Cognito account)
   function handleSuspend(u) {
     runAction(
       u.enabled ? api.suspendUser(u.userId) : api.unsuspendUser(u.userId),
@@ -56,6 +57,7 @@ export default function AdminUsersPage() {
     );
   }
 
+  // [Feature #45] Promote / demote a user in the Cognito "Admins" group
   function handlePromoteDemote(u) {
     runAction(
       u.isAdmin ? api.demoteUser(u.userId) : api.promoteUser(u.userId),
@@ -63,6 +65,7 @@ export default function AdminUsersPage() {
     );
   }
 
+  // [Feature #46] Permanently delete a user account and purge all their data
   function handleDelete(u) {
     runAction(api.deleteUserAccount(u.userId), () =>
       setUsers((prev) => prev.filter((x) => x.userId !== u.userId))

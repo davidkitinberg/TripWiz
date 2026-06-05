@@ -135,6 +135,9 @@ function buildEditUpdate(payload) {
   };
 }
 
+// [Feature #29] Real-time collaboration router: $connect/$disconnect, join/leave/edit,
+//               broadcasting accepted edits to every other client in the trip room.
+// [Feature #30] The "ping" action powers the client's presence/heartbeat indicator.
 exports.handler = async (event) => {
   console.log('WebSocket event:', JSON.stringify({ routeKey: event.requestContext && event.requestContext.routeKey }));
 
@@ -237,6 +240,7 @@ exports.handler = async (event) => {
     return json(200, { broadcasted: true });
   }
 
+  // [Feature #29] Apply a live edit (version-checked) and broadcast it to collaborators
   if (action === 'edit') {
     if (!['owner', 'editor'].includes(access.role)) {
       return json(403, { error: { code: 'FORBIDDEN', message: 'You cannot edit this trip' } });

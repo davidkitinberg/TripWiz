@@ -17,6 +17,7 @@ function buildEmailBody(messageObj) {
   return lines.join('\n');
 }
 
+// [Feature #41] Convert each published SNS weather alert into an email sent via SES
 exports.handler = async (event) => {
   console.log('SNS->SES handler received', JSON.stringify(event));
   if (!SOURCE_EMAIL || !ADMIN_EMAIL) {

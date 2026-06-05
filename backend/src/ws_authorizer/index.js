@@ -24,6 +24,7 @@ function extractToken(event) {
   return event.queryStringParameters && event.queryStringParameters.token;
 }
 
+// [Feature #29] WebSocket authorizer — validate the Cognito token before allowing connect
 exports.handler = async (event) => {
   const routeArn = event.methodArn || event.routeArn;
   const token = extractToken(event);

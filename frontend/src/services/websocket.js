@@ -23,6 +23,8 @@ export function send(msg) {
   }
 }
 
+// [Feature #29] Open the collaborative WebSocket and join a trip "room"
+// [Feature #30] Connection open/close drives the Live/Offline presence indicator
 export async function connect(tripId) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     if (currentTripId !== tripId) {

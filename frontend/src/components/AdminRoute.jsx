@@ -3,6 +3,7 @@ import { Navigate, useLocation } from 'react-router-dom';
 import { isAuthenticated } from '../services/auth';
 import { isCurrentUserAdmin } from '../services/admin';
 
+// [Feature #42] Admin route guard — must be signed in AND an admin, else redirect
 export default function AdminRoute({ children }) {
   const [state, setState] = useState({ checked: false, signedIn: false, isAdmin: false });
   const location = useLocation();

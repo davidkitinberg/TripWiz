@@ -11,6 +11,7 @@ const pool = new CognitoUserPool({
   ClientId: config.cognito.userPoolWebClientId,
 });
 
+// [Feature #1] User Sign-Up with email verification (Cognito registers user + emails code)
 export function signUp(email, password) {
   return new Promise((resolve, reject) => {
     const attrs = [new CognitoUserAttribute({ Name: 'email', Value: email })];
@@ -21,6 +22,7 @@ export function signUp(email, password) {
   });
 }
 
+// [Feature #2] Email confirmation code (verifies the 6-digit code from sign-up)
 export function confirmSignUp(email, code) {
   return new Promise((resolve, reject) => {
     const user = new CognitoUser({ Username: email, Pool: pool });
@@ -31,6 +33,7 @@ export function confirmSignUp(email, code) {
   });
 }
 
+// [Feature #3] User Sign-In via Cognito SRP (password never sent in plaintext)
 export function signIn(email, password) {
   return new Promise((resolve, reject) => {
     const user = new CognitoUser({ Username: email, Pool: pool });
@@ -73,6 +76,7 @@ export async function getAccessToken() {
   return session ? session.getAccessToken().getJwtToken() : null;
 }
 
+// [Feature #4] Session handling — basis for protected routes and authed API calls
 export async function isAuthenticated() {
   const session = await getSession();
   return session !== null;

@@ -15,6 +15,7 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // [Feature #9] If the user arrived from the home search, create their trip on first auth
   async function goAfterAuth() {
     const { destination, startDate, endDate } = location.state || {};
     if (destination?.name) {
@@ -33,6 +34,7 @@ export default function LoginPage() {
     navigate('/trips', { replace: true, state: { justSignedIn: true } });
   }
 
+  // [Feature #3] Sign-in form submit (maps Cognito errors to friendly messages)
   async function handleSignIn(e) {
     e.preventDefault();
     setError('');
@@ -58,6 +60,7 @@ export default function LoginPage() {
     }
   }
 
+  // [Feature #1] Sign-up form submit, then advance to the email-confirmation step
   async function handleSignUp(e) {
     e.preventDefault();
     setError('');
@@ -79,6 +82,7 @@ export default function LoginPage() {
     }
   }
 
+  // [Feature #2] Confirm the email code, then auto sign-in when possible
   async function handleConfirm(e) {
     e.preventDefault();
     setError('');
