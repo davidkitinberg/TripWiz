@@ -636,12 +636,36 @@ Resources:
           Properties:
             Topic: !Ref AlertsTopic
 
+  PostConfirmationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: TripWiz-PostConfirmation
+      CodeUri: ../src/
+      Handler: post_confirmation/index.handler
+      Runtime: nodejs24.x
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TripWizTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TripWizTable
+
+  PostConfirmationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PostConfirmationFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt TripWizUserPool.Arn
+
   TripWizUserPool:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: TripWizUserPool
       AutoVerifiedAttributes:
         - email
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFunction.Arn
 
   TripWizUserPoolClient:
     Type: AWS::Cognito::UserPoolClient

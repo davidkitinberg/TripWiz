@@ -5526,6 +5526,13 @@ h1, h2, h3, h4, h5, h6 {
   font-weight: 700;
 }
 .overview-modal-field--full { grid-column: 1 / -1; }
+.overview-field-error {
+  font-size: 0.72rem;
+  color: #fca5a5;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  font-weight: 500;
+}
 .overview-modal-flight-section {
   display: grid;
   gap: 0.8rem;

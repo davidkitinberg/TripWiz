@@ -256,6 +256,70 @@ function deriveAccommodationsFromItinerary(itinerary = [], trip = null) {
     .filter(Boolean);
 }
 
+// Trip date range as ISO "YYYY-MM-DD" strings, for <input type="date" min/max> and range checks.
+// A trip with no end date is treated as a single-day trip (end === start).
+function tripDateBounds(trip) {
+  const min = formatIsoDate(trip?.startDate);
+  const max = formatIsoDate(trip?.endDate) || min;
+  return { min: min || '', max: max || '' };
+}
+
+// A flight date is valid when it's left blank (not yet chosen) or falls within the trip's dates.
+function isFlightDateWithinTrip(dateValue, trip) {
+  if (!dateValue) return true;
+  const { min, max } = tripDateBounds(trip);
+  if (!min) return true;
+  return dateValue >= min && dateValue <= max;
+}
+
+const FLIGHT_STOP_PREFIX = 'flight-';
+
+// [Feature #32] Mirror a saved flight onto the trip-plan map as an itinerary stop, placed on
+// the day it lands (or departs, if no arrival time is known) at the corresponding time —
+// so flights show up alongside the rest of the day's plan without manual re-entry.
+function deriveItineraryStopFromFlight(flight, trip) {
+  if (!flight?.id || !flight?.date) return null;
+  const tripStart = parseTripDate(trip?.startDate);
+  const flightDate = parseTripDate(flight.date);
+  if (!tripStart || !flightDate) return null;
+
+  const dayIndex = Math.round((flightDate - tripStart) / (1000 * 60 * 60 * 24));
+  if (dayIndex < 0) return null;
+
+  const coords = airportCoordsByIata(flight.toIata) || airportCoordsByIata(flight.fromIata);
+  if (!coords) return null;
+
+  const time = flight.arrivalTime || flight.departureTime || '00:00';
+  const start = `${formatIsoDate(flightDate)}T${time}:00.000Z`;
+  const fromLabel = flight.from || flight.fromAirport || 'Departure';
+  const toLabel = flight.to || flight.toAirport || 'Arrival';
+  const flightCode = [flight.airline, flight.flightNumber].filter(Boolean).join(' ');
+
+  return {
+    slotId: `${FLIGHT_STOP_PREFIX}${flight.id}`,
+    title: `Flight${flightCode ? ` ${flightCode}` : ''}: ${fromLabel} → ${toLabel}`,
+    start,
+    coords,
+    dayIndex,
+    notes: flight.notes || '',
+  };
+}
+
+// Keeps the itinerary's flight-derived stop in sync with a saved flight: replaces (or removes,
+// if the flight can no longer be placed — e.g. no airport coordinates yet) the stop tied to
+// this flight's id, leaving every other stop untouched.
+function applyFlightToItinerary(itinerary, flight, trip) {
+  const stopId = `${FLIGHT_STOP_PREFIX}${flight.id}`;
+  const withoutFlightStop = (itinerary || []).filter((stop) => stop.slotId !== stopId);
+  const stop = deriveItineraryStopFromFlight(flight, trip);
+  return stop ? [...withoutFlightStop, stop] : withoutFlightStop;
+}
+
+function removeFlightFromItinerary(itinerary, flightId) {
+  const stopId = `${FLIGHT_STOP_PREFIX}${flightId}`;
+  return (itinerary || []).filter((stop) => stop.slotId !== stopId);
+}
+
 function normalizePackingCategories(input) {
   const categories = Array.isArray(input) ? input : [];
   if (categories.length === 0) return DEFAULT_PACKING.map((c) => ({ ...c, items: [] }));
@@ -658,6 +722,17 @@ const AIRPORT_SEARCH_INDEX = airports.filter((airport) => (
   ].filter(Boolean).join(' ');
   return entry;
 });
+
+const AIRPORT_COORDS_BY_IATA = new Map(
+  airports
+    .filter((airport) => airport.iata && Number.isFinite(airport.latitude) && Number.isFinite(airport.longitude))
+    .map((airport) => [String(airport.iata).toUpperCase(), { lat: airport.latitude, lng: airport.longitude }])
+);
+
+function airportCoordsByIata(iata) {
+  if (!iata) return null;
+  return AIRPORT_COORDS_BY_IATA.get(String(iata).trim().toUpperCase()) || null;
+}
 
 function getCachedSourceEntries(query) {
   // If user keeps typing, re-filter previous result-set instead of scanning all airports again.
@@ -1117,7 +1192,7 @@ export default function TripOverviewPage() {
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  async function persistDashboard(nextDashboard) {
+  async function persistDashboard(nextDashboard, nextItinerary) {
     if (!trip) return;
     setSaveStatus('saving');
     clearTimeout(saveTimerRef.current);
@@ -1126,10 +1201,12 @@ export default function TripOverviewPage() {
         ...(trip.metadata || {}),
         tripOverview: nextDashboard,
       };
-      const res = await api.updateTrip(tripId, {
+      const payload = {
         metadata: mergedMetadata,
         version: versionRef.current,
-      });
+      };
+      if (nextItinerary) payload.itinerary = nextItinerary;
+      const res = await api.updateTrip(tripId, payload);
       const updatedTrip = res.trip;
       versionRef.current = updatedTrip.version || versionRef.current + 1;
       setTrip(updatedTrip);
@@ -1148,14 +1225,14 @@ export default function TripOverviewPage() {
     }
   }
 
-  function updateDashboard(next) {
+  function updateDashboard(next, nextItinerary) {
     const nextDashboard = typeof next === 'function' ? next(dashboard) : next;
     setDashboard(nextDashboard);
-    persistDashboard(nextDashboard);
+    persistDashboard(nextDashboard, nextItinerary);
   }
 
-  function updateFlights(nextFlights) {
-    updateDashboard((current) => ({ ...current, flights: nextFlights }));
+  function updateFlights(nextFlights, nextItinerary) {
+    updateDashboard((current) => ({ ...current, flights: nextFlights }), nextItinerary);
   }
 
   function updateAccommodations(nextAccommodations) {
@@ -1277,13 +1354,16 @@ export default function TripOverviewPage() {
     setRentalCarModal(rentalCar);
   }
 
-  // [Feature #32] Create/update a flight reservation
+  // [Feature #32] Create/update a flight reservation, and mirror it onto the trip-plan
+  // map as an itinerary stop on its landing day/time (see deriveItineraryStopFromFlight)
   function saveFlightFlight(draft) {
+    if (!isFlightDateWithinTrip(draft.date, trip)) return;
     const flights = [...dashboard.flights];
     const index = flights.findIndex((flight) => flight.id === draft.id);
     if (index >= 0) flights[index] = draft;
     else flights.push(draft);
-    updateFlights(flights);
+    const itinerary = applyFlightToItinerary(trip?.itinerary || [], draft, trip);
+    updateFlights(flights, itinerary);
     setFlightModal(null);
   }
 
@@ -1308,7 +1388,8 @@ export default function TripOverviewPage() {
   }
 
   function removeFlight(flightId) {
-    updateFlights(dashboard.flights.filter((flight) => flight.id !== flightId));
+    const itinerary = removeFlightFromItinerary(trip?.itinerary || [], flightId);
+    updateFlights(dashboard.flights.filter((flight) => flight.id !== flightId), itinerary);
   }
 
   function removeStay(stayId) {
@@ -2372,8 +2453,9 @@ export default function TripOverviewPage() {
       {flightModal && (
         <FlightModal
           flight={flightModal}
+          trip={trip}
           dashboard={dashboard}
-          canUpload={dashboard.flights.some((flight) => flight.id === flightModal.id)}
+          canUpload
           attachments={attachmentsFor('flight', flightModal.id)}
           attachmentStatus={attachmentStatus}
           onUploadAttachment={(file) => uploadAttachment(file, 'flight', flightModal.id)}
@@ -2388,7 +2470,7 @@ export default function TripOverviewPage() {
         <StayModal
           stay={stayModal}
           dashboard={dashboard}
-          canUpload={dashboard.accommodations.some((stay) => stay.id === stayModal.id)}
+          canUpload
           attachments={attachmentsFor('accommodation', stayModal.id)}
           attachmentStatus={attachmentStatus}
           onUploadAttachment={(file) => uploadAttachment(file, 'accommodation', stayModal.id)}
@@ -2403,7 +2485,7 @@ export default function TripOverviewPage() {
         <RentalCarModal
           rentalCar={rentalCarModal}
           dashboard={dashboard}
-          canUpload={dashboard.rentalCars.some((car) => car.id === rentalCarModal.id)}
+          canUpload
           attachments={attachmentsFor('rentalCar', rentalCarModal.id)}
           attachmentStatus={attachmentStatus}
           onUploadAttachment={(file) => uploadAttachment(file, 'rentalCar', rentalCarModal.id)}
@@ -2515,8 +2597,10 @@ function AttachmentManager({
   );
 }
 
-function FlightModal({ flight, dashboard, canUpload, attachments, attachmentStatus, onUploadAttachment, onOpenAttachment, onDeleteAttachment, onClose, onSave }) {
+function FlightModal({ flight, trip, dashboard, canUpload, attachments, attachmentStatus, onUploadAttachment, onOpenAttachment, onDeleteAttachment, onClose, onSave }) {
   const [draft, setDraft] = useState(flight);
+  const { min: tripMinDate, max: tripMaxDate } = tripDateBounds(trip);
+  const dateInRange = isFlightDateWithinTrip(draft.date, trip);
 
   return (
     <ModalShell
@@ -2527,7 +2611,7 @@ function FlightModal({ flight, dashboard, canUpload, attachments, attachmentStat
       footer={(
         <>
           <button className="overview-modal-secondary" onClick={onClose} type="button">Cancel</button>
-          <button className="overview-modal-primary" onClick={() => onSave(draft)} type="button">Save flight</button>
+          <button className="overview-modal-primary" onClick={() => onSave(draft)} disabled={!dateInRange} type="button">Save flight</button>
         </>
       )}
     >
@@ -2594,12 +2678,30 @@ function FlightModal({ flight, dashboard, canUpload, attachments, attachmentStat
           </div>
         </div>
 
-        {['date', 'airline', 'flightNumber', 'price', 'status'].map((field) => (
+        <label className="overview-modal-field">
+          <span>date</span>
+          <input
+            className="trips-modal-input"
+            type="date"
+            min={tripMinDate || undefined}
+            max={tripMaxDate || undefined}
+            value={draft.date}
+            onChange={(e) => setDraft((current) => ({ ...current, date: e.target.value }))}
+          />
+          {!dateInRange && (
+            <span className="overview-field-error">
+              {tripMaxDate && tripMaxDate !== tripMinDate
+                ? `Must be between ${formatDisplayDate(tripMinDate)} and ${formatDisplayDate(tripMaxDate)} (the trip's dates).`
+                : `Must match the trip's date (${formatDisplayDate(tripMinDate)}).`}
+            </span>
+          )}
+        </label>
+        {['airline', 'flightNumber', 'price', 'status'].map((field) => (
           <label key={field} className="overview-modal-field">
             <span>{field}</span>
             <input
               className="trips-modal-input"
-              type={field === 'date' ? 'date' : 'text'}
+              type="text"
               value={draft[field]}
               onChange={(e) => setDraft((current) => ({ ...current, [field]: e.target.value }))}
             />

@@ -34,3 +34,7 @@ frontend/backend/
 
 # Root npm artifact when installing from the repository root by mistake
 /package-lock.json
+
+# Local artifacts created by the Folder 09 setup/deploy scripts
+09/.bin/
+09/last-deployment-url.txt
