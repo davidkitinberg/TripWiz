@@ -45,6 +45,42 @@ const DAY_COLORS = [
   '#EF4444', '#EC4899', '#06B6D4', '#84CC16',
 ];
 
+const ACTIVITY_TYPE_OPTIONS = [
+  { value: 'AUTO', label: 'Auto detect' },
+  { value: 'GENERAL_OUTDOOR', label: 'General outdoor' },
+  { value: 'INDOOR', label: 'Indoor' },
+  { value: 'BEACH', label: 'Beach' },
+  { value: 'SKI', label: 'Ski' },
+  { value: 'SCENIC_VIEW', label: 'Scenic / viewpoint' },
+];
+
+const DURATION_OPTIONS = [
+  { value: '', label: 'Select duration' },
+  { value: '30 min', label: '30 min' },
+  { value: '1 hour', label: '1 hour' },
+  { value: '1.5 hours', label: '1.5 hours' },
+  { value: '2 hours', label: '2 hours' },
+  { value: '2.5 hours', label: '2.5 hours' },
+  { value: '3 hours', label: '3 hours' },
+  { value: '4 hours', label: '4 hours' },
+  { value: '5 hours', label: '5 hours' },
+  { value: 'Full day', label: 'Full day' },
+  { value: 'CUSTOM', label: 'Custom' },
+];
+
+const PRESET_DURATION_VALUES = new Set(DURATION_OPTIONS.map((option) => option.value));
+
+function getDurationSelectValue(duration) {
+  if (!duration) return '';
+  return PRESET_DURATION_VALUES.has(duration) ? duration : 'CUSTOM';
+}
+
+function formatDurationForDisplay(duration) {
+  if (!duration) return '';
+  if (/hour|min|day/i.test(duration)) return duration;
+  return `${duration} hrs`;
+}
+
 function routeDistance(stops) {
   let total = 0;
   for (let i = 1; i < stops.length; i++) {
@@ -123,14 +159,18 @@ function stopsToItinerary(stops, tripStartDate) {
       d.setHours(parseInt(hh, 10) || 0, parseInt(mm, 10) || 0, 0, 0);
       start = d.toISOString();
     }
+    const activityType = s.activityType && s.activityType !== 'AUTO' ? s.activityType : undefined;
+    const duration = s.recommendedHours || '';
     return {
       slotId: s.stopId,
       title: s.name,
       coords: s.lat != null ? { lat: s.lat, lng: s.lng } : undefined,
-      notes: s.recommendedHours,
+      notes: duration,
+      duration,
       dayIndex: s.dayIndex || 0,
       start,
       end: '',
+      ...(activityType ? { activityType } : {}),
     };
   });
 }
@@ -160,9 +200,10 @@ function itineraryToStops(itinerary, tripStartDate) {
       name: item.title || 'Unnamed Location',
       lat: item.coords?.lat ?? null,
       lng: item.coords?.lng ?? null,
-      recommendedHours: item.notes || '2–3',
+      recommendedHours: item.duration || item.notes || '',
       dayIndex,
       startTime,
+      activityType: item.activityType || 'AUTO',
     };
   });
 }
@@ -374,9 +415,10 @@ function weatherIcon(condition) {
 // [Feature #17] Stop card with day/time edit + remove controls
 // [Feature #23] Shows per-stop weather badge and any weather warning
 // [Feature #24] Lists nearby indoor fallback suggestions with one-click Replace
-function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, weather, onRemove, onChangeDay, onChangeTime, onReplace }) {
+function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, weather, onRemove, onEdit, onChangeDay, onChangeTime, onReplace }) {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const hasSuggestions = alert && suggestions && suggestions.length > 0;
+  const durationLabel = formatDurationForDisplay(stop.recommendedHours);
 
   return (
     <div className={`stop-card ${alert ? 'stop-card--alert' : ''}`}>
@@ -387,7 +429,7 @@ function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, wea
           {alert && <span className="stop-alert-badge" title={alert.reason}>⚠️</span>}
         </div>
         <div className="stop-meta-row">
-          <span className="stop-duration">🕒 {stop.recommendedHours} hrs</span>
+          {durationLabel && <span className="stop-duration">🕒 {durationLabel}</span>}
           {weather && (
             <span className={`stop-weather-badge${weather.isAlert ? ' stop-weather-badge--alert' : ''}`}
               title={weather.description || weather.condition}>
@@ -458,7 +500,12 @@ function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, wea
         )}
       </div>
       {canEdit && (
-        <button className="stop-remove-btn" onClick={onRemove} title="Remove">×</button>
+        <div className="stop-card-actions">
+          <button className="stop-edit-btn" onClick={onEdit} title="Edit stop details" aria-label="Edit stop details">
+            <Pencil size={13} strokeWidth={2} />
+          </button>
+          <button className="stop-remove-btn" onClick={onRemove} title="Remove">×</button>
+        </div>
       )}
     </div>
   );
@@ -596,6 +643,10 @@ export default function TripPage() {
   const [pendingLocation, setPendingLocation] = useState(null);
   const [pendingDay, setPendingDay] = useState(0);
   const [pendingTime, setPendingTime] = useState('');
+  const [pendingActivityType, setPendingActivityType] = useState('AUTO');
+  const [pendingDuration, setPendingDuration] = useState('');
+  const [pendingCustomDuration, setPendingCustomDuration] = useState('');
+  const [editingStopId, setEditingStopId] = useState(null);
 
   const versionRef = useRef(1);
   const saveTimerRef = useRef(null);
@@ -708,27 +759,73 @@ export default function TripPage() {
     const defaultDay = activeDayFilter !== 'all' ? Number(activeDayFilter) : 0;
     setPendingDay(defaultDay);
     setPendingTime('');
+    setPendingActivityType('AUTO');
+    setPendingDuration('');
+    setPendingCustomDuration('');
+    setEditingStopId(null);
     setPendingLocation(location);
   }
 
-  // [Feature #15] Add the chosen place to the itinerary on the selected day/time
+  function closeStopModal() {
+    setPendingLocation(null);
+    setEditingStopId(null);
+    setPendingActivityType('AUTO');
+    setPendingDuration('');
+    setPendingCustomDuration('');
+  }
+
+  function getPendingDurationValue() {
+    return pendingDuration === 'CUSTOM' ? pendingCustomDuration.trim() : pendingDuration;
+  }
+
+  function openEditStop(stop) {
+    const duration = stop.recommendedHours || '';
+    setEditingStopId(stop.stopId);
+    setPendingLocation({
+      name: stop.name,
+      lat: stop.lat,
+      lng: stop.lng,
+      recommendedHours: duration,
+    });
+    setPendingDay(stop.dayIndex || 0);
+    setPendingTime(stop.startTime || '');
+    setPendingActivityType(stop.activityType || 'AUTO');
+    setPendingDuration(getDurationSelectValue(duration));
+    setPendingCustomDuration(getDurationSelectValue(duration) === 'CUSTOM' ? duration : '');
+  }
+
+  // [Feature #15] Add or edit the chosen place on the selected day/time
   function confirmAddStop() {
     if (!pendingLocation) return;
+    const duration = getPendingDurationValue();
+
+    if (editingStopId) {
+      updateStop(editingStopId, {
+        dayIndex: pendingDay,
+        startTime: pendingTime,
+        activityType: pendingActivityType,
+        recommendedHours: duration,
+      });
+      closeStopModal();
+      return;
+    }
+
     const newStop = {
       stopId: `s-${Date.now()}`,
       name: pendingLocation.name,
       lat: pendingLocation.lat,
       lng: pendingLocation.lng,
-      recommendedHours: pendingLocation.recommendedHours || '2–3',
+      recommendedHours: duration,
       dayIndex: pendingDay,
       startTime: pendingTime,
+      activityType: pendingActivityType,
     };
     setStops((prev) => {
       const next = [...prev, newStop];
       scheduleSave(next);
       return next;
     });
-    setPendingLocation(null);
+    closeStopModal();
   }
 
   function addStop(location) {
@@ -737,7 +834,7 @@ export default function TripPage() {
       name: location.name,
       lat: location.lat,
       lng: location.lng,
-      recommendedHours: location.recommendedHours || '2–3',
+      recommendedHours: '',
       dayIndex: 0,
       startTime: '',
     };
@@ -1272,6 +1369,7 @@ export default function TripPage() {
                             suggestions={fallbacks[stop.stopId]}
                             weather={stopWeather[stop.stopId]}
                             onRemove={() => removeStop(stop.stopId)}
+                            onEdit={() => openEditStop(stop)}
                             onChangeDay={(d) => updateStop(stop.stopId, { dayIndex: d })}
                             onChangeTime={(t) => updateStop(stop.stopId, { startTime: t })}
                             onReplace={(s) => replaceStop(stop.stopId, s)}
@@ -1320,15 +1418,17 @@ export default function TripPage() {
 
       {/* Add stop modal */}
       {pendingLocation && (
-        <div className="add-stop-backdrop" onClick={() => setPendingLocation(null)}>
+        <div className="add-stop-backdrop" onClick={closeStopModal}>
           <div className="add-stop-modal" onClick={(e) => e.stopPropagation()}>
             <div className="add-stop-place">
               <span className="add-stop-pin"><MapPin size={20} strokeWidth={2} color="#a5b4fc" /></span>
               <div className="add-stop-place-info">
                 <div className="add-stop-place-name">{pendingLocation.name}</div>
-                <div className="add-stop-place-duration">~{pendingLocation.recommendedHours} hrs estimated</div>
+                {pendingLocation.recommendedHours && (
+                  <div className="add-stop-place-duration">~{formatDurationForDisplay(pendingLocation.recommendedHours)} estimated</div>
+                )}
               </div>
-              <button className="add-stop-close" onClick={() => setPendingLocation(null)}>×</button>
+              <button className="add-stop-close" onClick={closeStopModal}>×</button>
             </div>
 
             <div className="add-stop-fields">
@@ -1356,10 +1456,52 @@ export default function TripPage() {
                   onChange={(e) => setPendingTime(e.target.value)}
                 />
               </label>
+
+              <label className="add-stop-field">
+                <span className="add-stop-field-label">Activity type</span>
+                <select
+                  className="add-stop-select"
+                  value={pendingActivityType}
+                  onChange={(e) => setPendingActivityType(e.target.value)}
+                >
+                  {ACTIVITY_TYPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="add-stop-field">
+                <span className="add-stop-field-label">Duration</span>
+                <select
+                  className="add-stop-select"
+                  value={pendingDuration}
+                  onChange={(e) => {
+                    setPendingDuration(e.target.value);
+                    if (e.target.value !== 'CUSTOM') setPendingCustomDuration('');
+                  }}
+                >
+                  {DURATION_OPTIONS.map((option) => (
+                    <option key={option.value || 'none'} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+
+              {pendingDuration === 'CUSTOM' && (
+                <label className="add-stop-field">
+                  <span className="add-stop-field-label">Custom duration</span>
+                  <input
+                    className="add-stop-time"
+                    type="text"
+                    value={pendingCustomDuration}
+                    onChange={(e) => setPendingCustomDuration(e.target.value)}
+                    placeholder="e.g. 45 min"
+                  />
+                </label>
+              )}
             </div>
 
             <div className="add-stop-actions">
-              <button className="add-stop-cancel" onClick={() => setPendingLocation(null)}>
+              <button className="add-stop-cancel" onClick={closeStopModal}>
                 Cancel
               </button>
               <button
@@ -1367,7 +1509,7 @@ export default function TripPage() {
                 style={{ background: DAY_COLORS[pendingDay % DAY_COLORS.length] }}
                 onClick={confirmAddStop}
               >
-                Add to Day {pendingDay + 1}
+                {editingStopId ? 'Save changes' : `Add to Day ${pendingDay + 1}`}
               </button>
             </div>
           </div>
