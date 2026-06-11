@@ -98,8 +98,6 @@ export const api = {
   getAdminUsers:      () => request('GET', '/admin/users'),
   suspendUser:        (userId) => request('POST', `/admin/users/${userId}/suspend`, {}),
   unsuspendUser:      (userId) => request('POST', `/admin/users/${userId}/unsuspend`, {}),
-  promoteUser:        (userId) => request('POST', `/admin/users/${userId}/promote`, {}),
-  demoteUser:         (userId) => request('POST', `/admin/users/${userId}/demote`, {}),
   deleteUserAccount:  (userId) => request('DELETE', `/admin/users/${userId}`),
   getAdminTrips:      (q) => request('GET', `/admin/trips${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   deleteAdminTrip:    (tripId) => request('DELETE', `/admin/trips/${tripId}`),

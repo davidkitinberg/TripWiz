@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MoreHorizontal, ShieldCheck, ShieldOff, UserX, UserCheck, Trash2, Eye } from 'lucide-react';
+import { MoreHorizontal, UserX, UserCheck, Trash2 } from 'lucide-react';
 import { api } from '../services/api';
 
 function fmtDate(d) {
@@ -13,6 +13,7 @@ export default function AdminUsersPage() {
   const [error, setError] = useState('');
   const [menuOpenId, setMenuOpenId] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmBlock, setConfirmBlock] = useState(null);
   const [acting, setActing] = useState(false);
   const tableRef = useRef(null);
 
@@ -49,20 +50,13 @@ export default function AdminUsersPage() {
     }
   }
 
-  // [Feature #44] Suspend / unsuspend a user (disable/enable their Cognito account)
-  function handleSuspend(u) {
+  // [Feature #44] Block / unblock a user (disable/enable their Cognito account)
+  function handleBlock(u) {
     runAction(
       u.enabled ? api.suspendUser(u.userId) : api.unsuspendUser(u.userId),
       () => setUsers((prev) => prev.map((x) => x.userId === u.userId ? { ...x, enabled: !x.enabled } : x))
     );
-  }
-
-  // [Feature #45] Promote / demote a user in the Cognito "Admins" group
-  function handlePromoteDemote(u) {
-    runAction(
-      u.isAdmin ? api.demoteUser(u.userId) : api.promoteUser(u.userId),
-      () => setUsers((prev) => prev.map((x) => x.userId === u.userId ? { ...x, isAdmin: !x.isAdmin } : x))
-    );
+    setConfirmBlock(null);
   }
 
   // [Feature #46] Permanently delete a user account and purge all their data
@@ -111,7 +105,7 @@ export default function AdminUsersPage() {
                 <td>
                   {u.enabled
                     ? <span className="admin-status-badge admin-status-badge--active">Active</span>
-                    : <span className="admin-status-badge admin-status-badge--suspended">Suspended</span>}
+                    : <span className="admin-status-badge admin-status-badge--suspended">Blocked</span>}
                 </td>
                 <td>
                   {u.isAdmin
@@ -129,11 +123,8 @@ export default function AdminUsersPage() {
                     </button>
                     {menuOpenId === u.userId && (
                       <div className="admin-action-menu">
-                        <button onClick={() => handlePromoteDemote(u)} disabled={acting}>
-                          {u.isAdmin ? <><ShieldOff size={14}/> Demote to User</> : <><ShieldCheck size={14}/> Promote to Admin</>}
-                        </button>
-                        <button onClick={() => handleSuspend(u)} disabled={acting}>
-                          {u.enabled ? <><UserX size={14}/> Suspend</> : <><UserCheck size={14}/> Unsuspend</>}
+                        <button onClick={() => { setConfirmBlock(u); setMenuOpenId(null); }} disabled={acting}>
+                          {u.enabled ? <><UserX size={14}/> Block User</> : <><UserCheck size={14}/> Unblock User</>}
                         </button>
                         <button className="admin-action-menu-danger" onClick={() => { setConfirmDelete(u); setMenuOpenId(null); }} disabled={acting}>
                           <Trash2 size={14}/> Delete Account
@@ -157,6 +148,31 @@ export default function AdminUsersPage() {
               <button className="btn-ghost" onClick={() => setConfirmDelete(null)} disabled={acting}>Cancel</button>
               <button className="btn-danger" onClick={() => handleDelete(confirmDelete)} disabled={acting}>
                 {acting ? 'Deleting…' : 'Delete Permanently'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmBlock && (
+        <div className="admin-modal-backdrop" onClick={() => setConfirmBlock(null)}>
+          <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>{confirmBlock.enabled ? 'Block this user?' : 'Unblock this user?'}</h2>
+            <p>
+              {confirmBlock.enabled
+                ? <>Blocked users cannot sign in or access TripWiz until they are unblocked.</>
+                : <>This will restore access for <strong>{confirmBlock.email}</strong>.</>}
+            </p>
+            <div className="admin-modal-actions">
+              <button className="btn-ghost" onClick={() => setConfirmBlock(null)} disabled={acting}>Cancel</button>
+              <button
+                className={confirmBlock.enabled ? 'btn-danger' : 'btn-primary'}
+                onClick={() => handleBlock(confirmBlock)}
+                disabled={acting}
+              >
+                {acting
+                  ? (confirmBlock.enabled ? 'Blocking...' : 'Unblocking...')
+                  : (confirmBlock.enabled ? 'Block User' : 'Unblock User')}
               </button>
             </div>
           </div>

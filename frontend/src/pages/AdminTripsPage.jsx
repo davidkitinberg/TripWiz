@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MoreHorizontal, EyeOff, Eye, Trash2, Search, X, MapPin, Calendar } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { MoreHorizontal, Eye, Trash2, Search } from 'lucide-react';
 import { api } from '../services/api';
 
 function useDebounce(value, ms = 350) {
@@ -13,75 +14,8 @@ function fmtDate(d) {
   return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// [Feature #47] Trip moderation — preview a trip's itinerary in a modal
-function TripPreviewModal({ trip, onClose, onDelete, acting }) {
-  return (
-    <div className="admin-modal-backdrop" onClick={onClose}>
-      <div className="admin-modal admin-trip-preview-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="admin-trip-preview-header">
-          <div>
-            <h2>{trip.title || 'Untitled Trip'}</h2>
-            <div className="admin-trip-preview-meta">
-              <span className="admin-trip-preview-owner">{trip.ownerEmail || 'Unknown owner'}</span>
-              {trip.startDate && (
-                <span className="admin-trip-preview-dates">
-                  <Calendar size={13} strokeWidth={2} />
-                  {fmtDate(trip.startDate)}{trip.endDate ? ` – ${fmtDate(trip.endDate)}` : ''}
-                </span>
-              )}
-            </div>
-          </div>
-          <button className="admin-icon-btn" onClick={onClose} aria-label="Close">
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="admin-trip-preview-body">
-          {trip.itinerary && trip.itinerary.length > 0 ? (
-            <ol className="admin-trip-itinerary">
-              {trip.itinerary.map((stop, i) => (
-                <li key={i} className="admin-trip-itinerary-item">
-                  <div className="admin-itinerary-num">{i + 1}</div>
-                  <div className="admin-itinerary-content">
-                    <div className="admin-itinerary-location">
-                      <MapPin size={13} strokeWidth={2} />
-                      {stop.location || stop.city || stop.name || 'Unknown location'}
-                    </div>
-                    {stop.startDate && (
-                      <div className="admin-itinerary-date">{fmtDate(stop.startDate)}{stop.endDate ? ` – ${fmtDate(stop.endDate)}` : ''}</div>
-                    )}
-                    {stop.activities && stop.activities.length > 0 && (
-                      <ul className="admin-itinerary-activities">
-                        {stop.activities.slice(0, 4).map((a, j) => (
-                          <li key={j}>{a.title || a.name || a}</li>
-                        ))}
-                        {stop.activities.length > 4 && (
-                          <li className="admin-muted">+{stop.activities.length - 4} more</li>
-                        )}
-                      </ul>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p className="admin-muted">No itinerary stops recorded.</p>
-          )}
-        </div>
-
-        <div className="admin-modal-actions">
-          <button className="btn-ghost" onClick={onClose}>Close</button>
-          <button className="btn-danger" onClick={() => onDelete(trip)} disabled={acting}>
-            <Trash2 size={14} />
-            {acting ? 'Deleting…' : 'Delete Trip'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function AdminTripsPage() {
+  const navigate = useNavigate();
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -89,7 +23,6 @@ export default function AdminTripsPage() {
   const debouncedQuery = useDebounce(query, 350);
   const [menuOpenId, setMenuOpenId] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
-  const [previewTrip, setPreviewTrip] = useState(null);
   const [acting, setActing] = useState(false);
   const tableRef = useRef(null);
 
@@ -127,21 +60,17 @@ export default function AdminTripsPage() {
     }
   }
 
-  // [Feature #48] Hide / unhide a trip for moderation
-  function handleHide(t) {
-    const next = !t.hidden;
-    runAction(api.hideAdminTrip(t.tripId, next), () =>
-      setTrips((prev) => prev.map((x) => x.tripId === t.tripId ? { ...x, hidden: next } : x))
-    );
-  }
-
   // [Feature #49] Delete a trip from the platform (admin moderation)
   function handleDelete(t) {
     runAction(api.deleteAdminTrip(t.tripId), () =>
       setTrips((prev) => prev.filter((x) => x.tripId !== t.tripId))
     );
     setConfirmDelete(null);
-    setPreviewTrip(null);
+  }
+
+  function handleView(t) {
+    setMenuOpenId(null);
+    navigate(`/trips/${t.tripId}/overview`);
   }
 
   return (
@@ -188,9 +117,7 @@ export default function AdminTripsPage() {
             {trips.map((t) => (
               <tr key={t.tripId} className={t.hidden ? 'admin-row--dim' : ''}>
                 <td>
-                  <button className="admin-trip-title-btn" onClick={() => setPreviewTrip(t)}>
-                    {t.title}
-                  </button>
+                  <div className="admin-trip-title">{t.title}</div>
                   <div className="admin-trip-id admin-mono">{(t.tripId || '').slice(0, 12)}…</div>
                 </td>
                 <td>{t.ownerEmail || <span className="admin-muted">unknown</span>}</td>
@@ -213,11 +140,8 @@ export default function AdminTripsPage() {
                     </button>
                     {menuOpenId === t.tripId && (
                       <div className="admin-action-menu">
-                        <button onClick={() => { setPreviewTrip(t); setMenuOpenId(null); }}>
-                          <Eye size={14}/> Preview
-                        </button>
-                        <button onClick={() => handleHide(t)} disabled={acting}>
-                          {t.hidden ? <><EyeOff size={14}/> Unhide</> : <><EyeOff size={14}/> Hide</>}
+                        <button onClick={() => handleView(t)}>
+                          <Eye size={14}/> View Trip
                         </button>
                         <button className="admin-action-menu-danger" onClick={() => { setConfirmDelete(t); setMenuOpenId(null); }} disabled={acting}>
                           <Trash2 size={14}/> Delete Trip
@@ -231,15 +155,6 @@ export default function AdminTripsPage() {
           </tbody>
         </table>
       </div>
-
-      {previewTrip && (
-        <TripPreviewModal
-          trip={previewTrip}
-          onClose={() => setPreviewTrip(null)}
-          onDelete={(t) => { setPreviewTrip(null); setConfirmDelete(t); }}
-          acting={acting}
-        />
-      )}
 
       {confirmDelete && (
         <div className="admin-modal-backdrop" onClick={() => setConfirmDelete(null)}>
