@@ -19,7 +19,8 @@ function loadHandler({ ddb, lambda, secrets, s3, fetchImpl }) {
       getSignedUrlPromise: jest.fn(() => Promise.resolve('https://signed.example/upload')),
       headObject: jest.fn(() => promiseResult({ ContentLength: 1 })),
       deleteObject: jest.fn(() => promiseResult({}))
-    })
+    }),
+    SES: jest.fn(() => ({ sendEmail: jest.fn(() => promiseResult({})) }))
   }));
   jest.doMock('node-fetch', () => fetchImpl || jest.fn());
   process.env.TABLE_NAME = 'TripWizTable';

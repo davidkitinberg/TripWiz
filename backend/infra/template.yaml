@@ -188,6 +188,8 @@ Resources:
           WS_ENDPOINT: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
           ADMIN_EMAILS: !Ref AdminBootstrapEmails
           DOCUMENTS_BUCKET: !Ref TripWizDocumentsBucket
+          SOURCE_EMAIL: !Ref SourceEmail
+          FRONTEND_URL: !Ref FrontendUrl
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TripWizTable
@@ -243,6 +245,11 @@ Resources:
               - execute-api:ManageConnections
             Resource:
               - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*"
+        - Statement:
+            Effect: Allow
+            Action:
+              - ses:SendEmail
+            Resource: '*'
       Events:
         GetTrips:
           Type: Api
@@ -701,6 +708,10 @@ Parameters:
     Type: Number
     Default: 2
     Description: Days before a trip starts to send the reminder email (default 2 = 48 hours notice)
+  FrontendUrl:
+    Type: String
+    Default: https://tripwiz.app
+    Description: Public frontend base URL used in transactional emails (trip invites, etc.)
 
 Outputs:
   TripWizTableName:

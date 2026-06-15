@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MoreHorizontal, EyeOff, Eye, Trash2, Search, X, MapPin, Calendar } from 'lucide-react';
+import { MoreVertical, EyeOff, Eye, Trash2, Search, X, MapPin, Calendar } from 'lucide-react';
 import { api } from '../services/api';
 
 function useDebounce(value, ms = 350) {
@@ -207,9 +207,10 @@ export default function AdminTripsPage() {
                     <button
                       className="admin-icon-btn"
                       onClick={() => setMenuOpenId(menuOpenId === t.tripId ? null : t.tripId)}
-                      aria-label="Actions"
+                      aria-label="Trip actions"
+                      title="Trip actions"
                     >
-                      <MoreHorizontal size={18} />
+                      <MoreVertical size={16} strokeWidth={2.25} aria-hidden="true" />
                     </button>
                     {menuOpenId === t.tripId && (
                       <div className="admin-action-menu">
