@@ -25,6 +25,7 @@ export async function getCurrentUserClaims() {
   return decodeJwtPayload(token);
 }
 
+// [Feature #42] Admin access check — Cognito "Admins" group OR bootstrap email whitelist
 export async function isCurrentUserAdmin() {
   const claims = await getCurrentUserClaims();
   if (!claims) return false;

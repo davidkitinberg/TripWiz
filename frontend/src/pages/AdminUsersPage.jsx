@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MoreHorizontal, ShieldCheck, ShieldOff, UserX, UserCheck, Trash2, Eye } from 'lucide-react';
+import { MoreVertical, ShieldCheck, ShieldOff, UserX, UserCheck, Trash2, Eye } from 'lucide-react';
 import { api } from '../services/api';
 
 function fmtDate(d) {
@@ -49,6 +49,7 @@ export default function AdminUsersPage() {
     }
   }
 
+  // [Feature #44] Suspend / unsuspend a user (disable/enable their Cognito account)
   function handleSuspend(u) {
     runAction(
       u.enabled ? api.suspendUser(u.userId) : api.unsuspendUser(u.userId),
@@ -56,6 +57,7 @@ export default function AdminUsersPage() {
     );
   }
 
+  // [Feature #45] Promote / demote a user in the Cognito "Admins" group
   function handlePromoteDemote(u) {
     runAction(
       u.isAdmin ? api.demoteUser(u.userId) : api.promoteUser(u.userId),
@@ -63,6 +65,7 @@ export default function AdminUsersPage() {
     );
   }
 
+  // [Feature #46] Permanently delete a user account and purge all their data
   function handleDelete(u) {
     runAction(api.deleteUserAccount(u.userId), () =>
       setUsers((prev) => prev.filter((x) => x.userId !== u.userId))
@@ -120,9 +123,10 @@ export default function AdminUsersPage() {
                     <button
                       className="admin-icon-btn"
                       onClick={() => setMenuOpenId(menuOpenId === u.userId ? null : u.userId)}
-                      aria-label="Actions"
+                      aria-label="User actions"
+                      title="User actions"
                     >
-                      <MoreHorizontal size={18} />
+                      <MoreVertical size={16} strokeWidth={2.25} aria-hidden="true" />
                     </button>
                     {menuOpenId === u.userId && (
                       <div className="admin-action-menu">

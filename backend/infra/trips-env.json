@@ -1,0 +1,16 @@
+{
+  "Variables": {
+    "TABLE_NAME": "TripWizTable",
+    "WS_ENDPOINT": "https://g4cm9h17wk.execute-api.us-east-1.amazonaws.com/prod",
+    "VALIDATE_FUNCTION_NAME": "TripWiz-Validate",
+    "PLACE_INDEX_NAME": "TripWizPlaceIndex",
+    "ROUTE_CALCULATOR_NAME": "TripWizRouteCalculator",
+    "DOCUMENTS_BUCKET": "tripwiz-tripwizdocumentsbucket-7udouvdjql5d",
+    "ADMIN_EMAILS": "amituniversitymail@gmail.com,davidkitinberg@gmail.com",
+    "BEDROCK_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "USER_POOL_ID": "us-east-1_BDUbabdwy",
+    "MAPPING_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:748005666870:secret:TripWiz/MappingApiKey-r6p3zH",
+    "SOURCE_EMAIL": "amituniversitymail@gmail.com",
+    "FRONTEND_URL": "http://localhost:5173"
+  }
+}

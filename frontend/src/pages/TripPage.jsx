@@ -16,6 +16,7 @@ function useDebounce(value, delay) {
   return dv;
 }
 
+// [Feature #21] Per-stop duration estimation from the place's category
 function estimateHours(categories = []) {
   const cats = categories.map((c) => c.toLowerCase());
   if (cats.some((c) => c.includes('airport') || c.includes('terminal'))) return '2–3';
@@ -53,6 +54,8 @@ function routeDistance(stops) {
   }
   return total;
 }
+
+
 
 function nearestNeighborOrder(stops) {
   const withCoords = stops.filter((s) => s.lat != null && s.lng != null);
@@ -247,6 +250,7 @@ function parseNominatimResult(r, hebrewQuery) {
   };
 }
 
+// [Feature #15] Place autocomplete search (OpenStreetMap / Nominatim, Hebrew-aware)
 async function searchNominatim(query) {
   const hebrew = isHebrewText(query);
   const lang = hebrew ? 'he,en' : 'en';
@@ -367,6 +371,9 @@ function weatherIcon(condition) {
   return '🌤️';
 }
 
+// [Feature #17] Stop card with day/time edit + remove controls
+// [Feature #23] Shows per-stop weather badge and any weather warning
+// [Feature #24] Lists nearby indoor fallback suggestions with one-click Replace
 function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, weather, onRemove, onChangeDay, onChangeTime, onReplace }) {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const hasSuggestions = alert && suggestions && suggestions.length > 0;
@@ -459,6 +466,7 @@ function StopCard({ stop, globalNum, totalDays, canEdit, alert, suggestions, wea
 
 /* ─────────────── AI Suggestion Panel ─────────────── */
 
+// [Feature #20] AI route suggestion preview panel (reasoning, day-by-day, savings)
 function AiSuggestionPanel({ suggestion, onApply, onDismiss }) {
   if (!suggestion) return null;
 
@@ -631,6 +639,8 @@ export default function TripPage() {
       .catch(() => {});
   }, [tripId]);
 
+  // [Feature #29] Live co-editing: receive broadcast edits from other collaborators
+  // [Feature #30] Track WebSocket connect/disconnect for the Live/Offline indicator
   useEffect(() => {
     const offConnected = on('connected', () => setWsConnected(true));
     const offDisconnected = on('disconnected', () => setWsConnected(false));
@@ -648,6 +658,7 @@ export default function TripPage() {
     return () => { offConnected(); offDisconnected(); offEdit(); disconnect(); };
   }, [tripId]);
 
+  // [Feature #19] Recompute real road-route geometry (Amazon Location) when stops settle
   const debouncedStops = useDebounce(stops, 1500);
   useEffect(() => {
     const geoStops = debouncedStops.filter((s) => s.lat != null && s.lng != null);
@@ -663,6 +674,7 @@ export default function TripPage() {
 
   const canEdit = access === 'owner' || access === 'editor';
 
+  // [Feature #18] Auto-save the itinerary with optimistic version control (409 on conflict)
   async function doSave(newStops, newTitle) {
     setSaveStatus('saving');
     try {
@@ -699,6 +711,7 @@ export default function TripPage() {
     setPendingLocation(location);
   }
 
+  // [Feature #15] Add the chosen place to the itinerary on the selected day/time
   function confirmAddStop() {
     if (!pendingLocation) return;
     const newStop = {
@@ -735,6 +748,7 @@ export default function TripPage() {
     });
   }
 
+  // [Feature #17] Remove a stop from the itinerary
   function removeStop(stopId) {
     setStops((prev) => {
       const next = prev.filter((s) => s.stopId !== stopId);
@@ -743,6 +757,7 @@ export default function TripPage() {
     });
   }
 
+  // [Feature #17] Update a stop's day/time (re-sorts and re-numbers the itinerary)
   function updateStop(stopId, updates) {
     setStops((prev) => {
       const next = prev.map((s) => (s.stopId === stopId ? { ...s, ...updates } : s));
@@ -751,6 +766,7 @@ export default function TripPage() {
     });
   }
 
+  // [Feature #24] Replace a weather-flagged stop with a suggested indoor alternative
   function replaceStop(stopId, suggestion) {
     updateStop(stopId, {
       name: suggestion.name,
@@ -766,7 +782,7 @@ export default function TripPage() {
     });
   }
 
-  /* Optimize via Amazon Bedrock (Claude Haiku 4.5). The backend returns a
+  /* [Feature #20] Optimize via Amazon Bedrock (Claude Haiku 4.5). The backend returns a
      suggested order + reasoning; we build a preview the user can Apply or Cancel. */
   async function handleOptimize() {
     if (optimizing) return;
@@ -839,6 +855,7 @@ export default function TripPage() {
     }
   }
 
+  // [Feature #20] Apply the AI suggestion to the itinerary and save immediately
   async function applyRouteSuggestion() {
     if (!routeSuggestion) return;
     const appliedStops = routeSuggestion.stops;
@@ -885,6 +902,7 @@ export default function TripPage() {
     doSave(stopsRef.current, newTitle);
   }
 
+  // [Feature #27] Open the Share modal and load the trip's collaborators
   async function openShareModal() {
     setShowShareModal(true);
     setInviteError('');
@@ -903,6 +921,7 @@ export default function TripPage() {
     setInviteError('');
   }
 
+  // [Feature #26] Invite a collaborator by email (grants editor access)
   async function handleInvite(e) {
     e.preventDefault();
     const email = inviteEmail.trim().toLowerCase();
@@ -920,6 +939,7 @@ export default function TripPage() {
     }
   }
 
+  // [Feature #27] Remove a collaborator from the trip
   async function handleRemoveCollaborator(userId) {
     if (!window.confirm('Remove this collaborator from the trip?')) return;
     setRemovingId(userId);
@@ -933,12 +953,14 @@ export default function TripPage() {
     }
   }
 
+  // [Feature #28] Copy the shareable trip link (link openers get viewer access)
   function handleCopyLink() {
     navigator.clipboard.writeText(window.location.href).catch(() => {});
     setCopyToast(true);
     setTimeout(() => setCopyToast(false), 2000);
   }
 
+  // [Feature #22] Trigger the weather check (async validate Lambda) and poll for results
   async function handleValidate() {
     if (validating) return;
 
@@ -1038,7 +1060,7 @@ export default function TripPage() {
     );
   }
 
-  /* Group + globally number stops — always use original stops so sidebar is never overridden */
+  /* [Feature #16] Group + globally number stops by day — always use original stops so sidebar is never overridden */
   const totalDays = getTotalDays(trip, stops);
   const dayGroups = {};
   for (let i = 0; i < totalDays; i++) dayGroups[i] = [];

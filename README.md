@@ -50,6 +50,7 @@ A serverless, AI-powered travel planning platform. Users build multi-stop trip i
    │  TripWiz-Validate  (EventBridge nightly)  │
    │  TripWiz-TripReminder (cron 8am UTC)      │
    │  TripWiz-SnsToSes  (SNS → SES emails)    │
+   │  TripWiz-PostConfirmation (Cognito sign-up)│
    └────────────────────────────────────────────┘
 ```
 
@@ -58,6 +59,7 @@ A serverless, AI-powered travel planning platform. Users build multi-stop trip i
 | Flow | Path |
 |---|---|
 | User auth | Cognito SRP → JWT → API Gateway Cognito authorizer |
+| New sign-up | Cognito post-confirmation → PostConfirmation Lambda → seeds default `notifyTrips: true` prefs in DynamoDB |
 | Trip CRUD | Frontend → REST API → Lambda → DynamoDB |
 | Weather alerts | Validate Lambda → Open-Meteo → SNS → SES |
 | AI optimization | Lambda → AWS Bedrock (Claude Haiku) |
@@ -176,8 +178,10 @@ TripWiz/
 │       │   └── index.js         # WebSocket message handler Lambda
 │       ├── ws_authorizer/
 │       │   └── index.js         # WebSocket token authorizer Lambda
-│       └── sns_to_ses/
-│           └── index.js         # Converts SNS alerts → SES emails
+│       ├── sns_to_ses/
+│       │   └── index.js         # Converts SNS alerts → SES emails
+│       └── post_confirmation/
+│           └── index.js         # Cognito post-confirmation trigger — seeds default notification prefs
 └── frontend/
     ├── package.json
     ├── vite.config.js

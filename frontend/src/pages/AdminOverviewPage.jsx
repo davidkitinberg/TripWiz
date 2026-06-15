@@ -267,6 +267,7 @@ function ActivityFeed({ activity, loading }) {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
+// [Feature #43] Admin metrics dashboard — totals, 7-day activity chart, rings, feed
 export default function AdminOverviewPage() {
   const [metrics,   setMetrics]   = useState(null);
   const [trending,  setTrending]  = useState([]);

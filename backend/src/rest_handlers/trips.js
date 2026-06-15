@@ -7,6 +7,8 @@ const secrets = new AWS.SecretsManager();
 const cognito = new AWS.CognitoIdentityServiceProvider();
 const bedrock = new AWS.BedrockRuntime();
 const location = new AWS.Location();
+const s3 = new AWS.S3();
+const ses = new AWS.SES();
 
 const TABLE_NAME = process.env.TABLE_NAME;
 const VALIDATE_FUNCTION_NAME = process.env.VALIDATE_FUNCTION_NAME;
@@ -16,6 +18,18 @@ const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-ha
 const PLACE_INDEX_NAME = process.env.PLACE_INDEX_NAME || 'TripWizPlaceIndex';
 const ROUTE_CALCULATOR_NAME = process.env.ROUTE_CALCULATOR_NAME || 'TripWizRouteCalculator';
 const WS_ENDPOINT = process.env.WS_ENDPOINT;
+const DOCUMENTS_BUCKET = process.env.DOCUMENTS_BUCKET;
+const SOURCE_EMAIL = process.env.SOURCE_EMAIL;
+const FRONTEND_URL = String(process.env.FRONTEND_URL || 'https://tripwiz.app').replace(/\/$/, '');
+const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+const ALLOWED_ATTACHMENT_TYPES = new Map([
+  ['application/pdf', ['pdf']],
+  ['image/png', ['png']],
+  ['image/jpeg', ['jpg', 'jpeg']],
+  ['image/webp', ['webp']],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', ['docx']]
+]);
+const ALLOWED_RELATED_ITEM_TYPES = new Set(['flight', 'accommodation', 'rentalCar', 'general']);
 
 const uuid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const ok = (statusCode, body) => ({ statusCode, headers: corsHeaders(), body: body === undefined ? '' : JSON.stringify(body) });
@@ -80,6 +94,7 @@ function getUserGroups(event) {
   return String(raw).replace(/[\[\]"\s]/g, '').split(',').filter(Boolean);
 }
 
+// [Feature #42] Server-side admin check — Cognito "Admins" group OR email whitelist
 function isAdminEvent(event) {
   if (getUserGroups(event).includes(ADMIN_GROUP_NAME)) return true;
   const email = getUserEmail(event);
@@ -214,6 +229,7 @@ async function getTripAccess(userId, tripId) {
   return res.Item || null;
 }
 
+// [Feature #28] Resolve trip access: owner, invited collaborator, or link-share viewer
 async function resolveTripForUser(userId, tripId) {
   // 1. Owner: their own copy is stored directly under USER#userId
   const pointer = await getUserTripPointer(userId, tripId);
@@ -250,6 +266,113 @@ async function resolveTripForUser(userId, tripId) {
 function publicTrip(item) {
   const { PK, SK, GSI1PK, tripStart, ...rest } = item;
   return rest;
+}
+
+function safeFileName(name) {
+  const raw = String(name || 'document').trim();
+  const cleaned = raw
+    .replace(/[\\/:*?"<>|#%{}^~[\]`]/g, '-')
+    .replace(/\s+/g, ' ')
+    .slice(0, 140)
+    .trim();
+  return cleaned || 'document';
+}
+
+function fileExtension(name) {
+  const match = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match ? match[1] : '';
+}
+
+function inferAttachmentType(fileName, fileType) {
+  const explicit = String(fileType || '').toLowerCase().trim();
+  if (explicit) return explicit;
+  const ext = fileExtension(fileName);
+  if (ext === 'pdf') return 'application/pdf';
+  if (ext === 'png') return 'image/png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  return '';
+}
+
+function validateAttachmentInput(input) {
+  const fileName = safeFileName(input.fileName);
+  const fileType = inferAttachmentType(fileName, input.fileType);
+  const fileSize = Number(input.fileSize);
+  const relatedItemType = String(input.relatedItemType || 'general').trim();
+  const relatedItemId = input.relatedItemId ? String(input.relatedItemId).trim() : null;
+  const extension = fileExtension(fileName);
+
+  if (!fileName) {
+    const e = new Error('fileName is required');
+    e.statusCode = 400;
+    e.code = 'INVALID_FILE';
+    throw e;
+  }
+  if (!Number.isFinite(fileSize) || fileSize <= 0 || fileSize > MAX_ATTACHMENT_SIZE_BYTES) {
+    const e = new Error('File must be 10 MB or smaller');
+    e.statusCode = 400;
+    e.code = 'FILE_TOO_LARGE';
+    throw e;
+  }
+  if (!ALLOWED_ATTACHMENT_TYPES.has(fileType) || !ALLOWED_ATTACHMENT_TYPES.get(fileType).includes(extension)) {
+    const e = new Error('Unsupported file type. Use PDF, PNG, JPG, JPEG, WEBP, or DOCX.');
+    e.statusCode = 400;
+    e.code = 'UNSUPPORTED_FILE_TYPE';
+    throw e;
+  }
+  if (!ALLOWED_RELATED_ITEM_TYPES.has(relatedItemType)) {
+    const e = new Error('relatedItemType must be flight, accommodation, rentalCar, or general');
+    e.statusCode = 400;
+    e.code = 'INVALID_RELATED_ITEM';
+    throw e;
+  }
+  if (relatedItemType !== 'general' && !relatedItemId) {
+    const e = new Error('relatedItemId is required for item-specific attachments');
+    e.statusCode = 400;
+    e.code = 'RELATED_ITEM_REQUIRED';
+    throw e;
+  }
+
+  return { fileName, fileType, fileSize, relatedItemType, relatedItemId };
+}
+
+function publicAttachment(item) {
+  if (!item) return null;
+  const { PK, SK, ownerId, ...rest } = item;
+  return rest;
+}
+
+async function requireTripAccess(userId, tripId, edit = false) {
+  const resolved = await resolveTripForUser(userId, tripId);
+  if (!resolved) {
+    const e = new Error('Trip not found');
+    e.statusCode = 404;
+    e.code = 'NOT_FOUND';
+    throw e;
+  }
+  if (edit && !['owner', 'editor'].includes(resolved.access.role)) {
+    const e = new Error('You cannot edit this trip');
+    e.statusCode = 403;
+    e.code = 'FORBIDDEN';
+    throw e;
+  }
+  return resolved;
+}
+
+async function getAttachmentForTrip(userId, tripId, fileId, edit = false) {
+  await requireTripAccess(userId, tripId, edit);
+  const res = await ddb.get({
+    TableName: TABLE_NAME,
+    Key: { PK: `TRIP#${tripId}`, SK: `ATTACHMENT#${fileId}` }
+  }).promise();
+  if (!res.Item || res.Item.status !== 'uploaded') {
+    const e = new Error('Attachment not found');
+    e.statusCode = 404;
+    e.code = 'NOT_FOUND';
+    throw e;
+  }
+  return res.Item;
 }
 
 async function writeAccessRecords(trip, collaborators) {
@@ -331,6 +454,78 @@ async function lookupUserByEmail(email) {
   return sub ? { userId: sub, email: (userEmail || email).toLowerCase() } : null;
 }
 
+function formatTripDate(iso) {
+  if (!iso) return null;
+  return new Date(iso).toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+  });
+}
+
+function buildCollaboratorInviteEmailHtml({ tripTitle, tripId, inviterEmail, role, startDate, endDate }) {
+  const tripUrl = `${FRONTEND_URL}/trips/${tripId}`;
+  const roleLabel = role === 'editor' ? 'Editor' : 'Viewer';
+  const dateLine = startDate
+    ? `<p style="color:#4b5563;margin:0 0 16px;">Dates: <strong>${formatTripDate(startDate)}</strong>${endDate ? ` – <strong>${formatTripDate(endDate)}</strong>` : ''}</p>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:24px;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);border-radius:14px 14px 0 0;padding:36px 32px;text-align:center;">
+      <p style="color:rgba(255,255,255,0.7);font-size:12px;margin:0 0 6px;letter-spacing:1.5px;text-transform:uppercase;">TripWiz</p>
+      <h1 style="color:#fff;margin:0;font-size:26px;font-weight:700;">You've been invited to a trip</h1>
+    </div>
+    <div style="background:#fff;border-radius:0 0 14px 14px;padding:32px;">
+      <p style="color:#4b5563;margin:0 0 16px;line-height:1.6;">
+        <strong>${inviterEmail}</strong> invited you to collaborate on
+        <strong>${tripTitle}</strong> as an <strong>${roleLabel}</strong>.
+      </p>
+      ${dateLine}
+      <p style="color:#4b5563;margin:0 0 24px;line-height:1.6;">
+        Sign in to TripWiz to view the itinerary, edit stops together in real time, and help plan the trip.
+      </p>
+      <div style="text-align:center;">
+        <a href="${tripUrl}"
+           style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;padding:13px 32px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">
+          Open Trip
+        </a>
+      </div>
+    </div>
+    <p style="text-align:center;color:#9ca3af;font-size:12px;margin-top:16px;">
+      You received this because a TripWiz user shared a trip with your account.
+    </p>
+  </div>
+</body>
+</html>`;
+}
+
+async function sendCollaboratorInviteEmail({ toEmail, tripTitle, tripId, inviterEmail, role, startDate, endDate }) {
+  if (!SOURCE_EMAIL) {
+    console.warn('SOURCE_EMAIL not configured — skipping collaborator invite email');
+    return;
+  }
+
+  const subject = `You're invited to plan "${tripTitle}" on TripWiz`;
+  const html = buildCollaboratorInviteEmailHtml({
+    tripTitle,
+    tripId,
+    inviterEmail,
+    role,
+    startDate,
+    endDate
+  });
+
+  await ses.sendEmail({
+    Source: SOURCE_EMAIL,
+    Destination: { ToAddresses: [toEmail] },
+    Message: {
+      Subject: { Data: subject, Charset: 'UTF-8' },
+      Body: { Html: { Data: html, Charset: 'UTF-8' } }
+    }
+  }).promise();
+}
+
 async function getSecretJson(secretArn) {
   const data = await secrets.getSecretValue({ SecretId: secretArn }).promise();
   const raw = data.SecretString || Buffer.from(data.SecretBinary, 'base64').toString('utf8');
@@ -345,6 +540,7 @@ function classifyStop(name) {
   return 'attraction';
 }
 
+// [Feature #20] AI route optimization via Amazon Bedrock (Claude Haiku 4.5)
 async function optimizeWithBedrock(itinerary) {
   const raw = (itinerary || []).filter((s) => s && s.coords && s.coords.lat != null && s.coords.lng != null);
 
@@ -515,6 +711,7 @@ async function searchPlaces(query, biasLng, biasLat) {
   });
 }
 
+// [Feature #19] Compute real road-route geometry per day via Amazon Location Service
 async function calculateRoute(body) {
   const { stops } = body;
   if (!Array.isArray(stops) || stops.length < 2) {
@@ -571,6 +768,7 @@ async function calculateRoute(body) {
   return { days };
 }
 
+// [Feature #29] After a REST save, broadcast the new trip to all connected collaborators
 async function broadcastTripUpdate(tripId, trip, editorUserId) {
   if (!WS_ENDPOINT) return;
   const connections = await ddb.query({
@@ -614,6 +812,7 @@ exports.handler = async (event) => {
   if (!userId) return fail(401, 'UNAUTHORIZED', 'A valid Cognito JWT is required');
 
   try {
+    // [Feature #10] List the signed-in user's (non-deleted) trips
     if (method === 'GET' && path === '/trips') {
       const res = await ddb.query({
         TableName: TABLE_NAME,
@@ -628,6 +827,7 @@ exports.handler = async (event) => {
       return ok(200, { items: (res.Items || []).map(publicTrip), lastKey: res.LastEvaluatedKey });
     }
 
+    // [Feature #9] Create a trip + its owner access record
     if (method === 'POST' && path === '/trips') {
       const body = parseBody(event);
       const tripId = `t-${uuid()}`;
@@ -661,6 +861,7 @@ exports.handler = async (event) => {
       return ok(201, { tripId, trip: publicTrip(trip) });
     }
 
+    // [Feature #28] Fetch a single trip + the caller's access role (owner/editor/viewer)
     if (method === 'GET' && path === '/trips/{tripId}') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -669,6 +870,132 @@ exports.handler = async (event) => {
       return ok(200, { trip: publicTrip(resolved.trip), access: resolved.access.role });
     }
 
+    // [Feature #35] List a trip's uploaded documents
+    if (method === 'GET' && path === '/trips/{tripId}/attachments') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
+      await requireTripAccess(userId, tripId, false);
+      const res = await ddb.query({
+        TableName: TABLE_NAME,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
+        FilterExpression: '#status = :uploaded',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':pk': `TRIP#${tripId}`,
+          ':skp': 'ATTACHMENT#',
+          ':uploaded': 'uploaded'
+        }
+      }).promise();
+      const items = (res.Items || [])
+        .map(publicAttachment)
+        .sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')));
+      return ok(200, { items });
+    }
+
+    // [Feature #35] Issue a presigned S3 PUT URL for a trip document upload
+    if (method === 'POST' && path === '/trips/{tripId}/attachments/upload-url') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
+      if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
+      const resolved = await requireTripAccess(userId, tripId, true);
+      const input = validateAttachmentInput(parseBody(event));
+      const fileId = `f-${uuid()}`;
+      const s3Key = `trip-documents/${resolved.trip.ownerId}/${tripId}/${fileId}/${input.fileName}`;
+      const uploadUrl = await s3.getSignedUrlPromise('putObject', {
+        Bucket: DOCUMENTS_BUCKET,
+        Key: s3Key,
+        ContentType: input.fileType,
+        Expires: 300,
+      });
+      return ok(200, { fileId, s3Key, uploadUrl, expiresIn: 300 });
+    }
+
+    // [Feature #35] Finalize an upload: verify the S3 object then record its metadata
+    if (method === 'POST' && path === '/trips/{tripId}/attachments/{fileId}/complete') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      const fileId = event.pathParameters && event.pathParameters.fileId;
+      if (!tripId || !fileId) return fail(400, 'BAD_REQUEST', 'tripId and fileId are required');
+      if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
+      const resolved = await requireTripAccess(userId, tripId, true);
+      const body = parseBody(event);
+      const input = validateAttachmentInput(body);
+      const s3Key = String(body.s3Key || '');
+      const expectedPrefix = `trip-documents/${resolved.trip.ownerId}/${tripId}/${fileId}/`;
+      if (!s3Key.startsWith(expectedPrefix)) return fail(400, 'INVALID_S3_KEY', 'Invalid attachment key');
+
+      let head;
+      try {
+        head = await s3.headObject({ Bucket: DOCUMENTS_BUCKET, Key: s3Key }).promise();
+      } catch (err) {
+        return fail(400, 'UPLOAD_NOT_FOUND', 'Uploaded file was not found in storage');
+      }
+      if (Number(head.ContentLength || 0) !== input.fileSize) {
+        return fail(400, 'UPLOAD_SIZE_MISMATCH', 'Uploaded file size does not match the requested file');
+      }
+
+      const now = new Date().toISOString();
+      const item = {
+        PK: `TRIP#${tripId}`,
+        SK: `ATTACHMENT#${fileId}`,
+        entityType: 'TripAttachment',
+        fileId,
+        tripId,
+        ownerId: resolved.trip.ownerId,
+        fileName: input.fileName,
+        fileType: input.fileType,
+        fileSize: input.fileSize,
+        uploadedAt: now,
+        uploadedBy: userId,
+        s3Key,
+        relatedItemType: input.relatedItemType,
+        relatedItemId: input.relatedItemId,
+        status: 'uploaded'
+      };
+      await ddb.put({
+        TableName: TABLE_NAME,
+        Item: item,
+        ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)'
+      }).promise();
+      return ok(201, { attachment: publicAttachment(item) });
+    }
+
+    // [Feature #35] Issue a presigned S3 GET URL to open a trip document
+    if (method === 'GET' && path === '/trips/{tripId}/attachments/{fileId}/download-url') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      const fileId = event.pathParameters && event.pathParameters.fileId;
+      if (!tripId || !fileId) return fail(400, 'BAD_REQUEST', 'tripId and fileId are required');
+      if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
+      const attachment = await getAttachmentForTrip(userId, tripId, fileId, false);
+      const downloadUrl = await s3.getSignedUrlPromise('getObject', {
+        Bucket: DOCUMENTS_BUCKET,
+        Key: attachment.s3Key,
+        Expires: 300,
+        ResponseContentDisposition: `inline; filename="${safeFileName(attachment.fileName)}"`
+      });
+      return ok(200, { downloadUrl, expiresIn: 300 });
+    }
+
+    // [Feature #35] Delete a trip document (S3 object + metadata)
+    if (method === 'DELETE' && path === '/trips/{tripId}/attachments/{fileId}') {
+      const tripId = event.pathParameters && event.pathParameters.tripId;
+      const fileId = event.pathParameters && event.pathParameters.fileId;
+      if (!tripId || !fileId) return fail(400, 'BAD_REQUEST', 'tripId and fileId are required');
+      if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
+      const attachment = await getAttachmentForTrip(userId, tripId, fileId, true);
+      try {
+        await s3.deleteObject({ Bucket: DOCUMENTS_BUCKET, Key: attachment.s3Key }).promise();
+      } catch (err) {
+        if (err.code !== 'NoSuchKey' && err.code !== 'NotFound') throw err;
+      }
+      await ddb.delete({
+        TableName: TABLE_NAME,
+        Key: { PK: `TRIP#${tripId}`, SK: `ATTACHMENT#${fileId}` }
+      }).promise();
+      return noContent();
+    }
+
+    // [Feature #11][Feature #18][Feature #36] Update a trip with optimistic version control,
+    // sync collaborator access, and broadcast the change to live editors
     if (method === 'PUT' && path === '/trips/{tripId}') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -732,6 +1059,7 @@ exports.handler = async (event) => {
       }
     }
 
+    // [Feature #13] Soft-delete a trip (owner only)
     if (method === 'DELETE' && path === '/trips/{tripId}') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -749,6 +1077,7 @@ exports.handler = async (event) => {
       return noContent();
     }
 
+    // [Feature #23] Return stored weather alerts + last-validated timestamp
     if (method === 'GET' && path === '/trips/{tripId}/alerts') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -779,6 +1108,7 @@ exports.handler = async (event) => {
       });
     }
 
+    // [Feature #24] Return stored indoor fallback suggestions per stop
     if (method === 'GET' && path === '/trips/{tripId}/fallbacks') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -800,6 +1130,7 @@ exports.handler = async (event) => {
       return ok(200, { fallbacks, count: fallbacks.length });
     }
 
+    // [Feature #23] Return stored per-stop weather forecast data
     if (method === 'GET' && path === '/trips/{tripId}/weather') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -829,6 +1160,7 @@ exports.handler = async (event) => {
       });
     }
 
+    // [Feature #22] Trigger the weather validation Lambda asynchronously
     if (method === 'POST' && path === '/trips/{tripId}/validate') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -847,6 +1179,7 @@ exports.handler = async (event) => {
       return ok(202, { jobId: `validate-${tripId}-${Date.now()}`, slotsToCheck, totalSlots: itinerary.length });
     }
 
+    // [Feature #26] Invite a collaborator by email (owner only); grants editor access
     if (method === 'POST' && path === '/trips/{tripId}/invite') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -935,11 +1268,26 @@ exports.handler = async (event) => {
         }
       ]);
 
+      try {
+        await sendCollaboratorInviteEmail({
+          toEmail: invited.email,
+          tripTitle: trip.title || 'Untitled Trip',
+          tripId,
+          inviterEmail: getUserEmail(event) || 'A TripWiz user',
+          role: 'editor',
+          startDate: trip.startDate,
+          endDate: trip.endDate
+        });
+      } catch (err) {
+        console.warn(`Collaborator invite email failed for trip=${tripId} to=${invited.email}:`, err.message);
+      }
+
       return ok(200, {
         collaborator: { userId: invited.userId, email: invited.email, role: 'editor', addedAt: now }
       });
     }
 
+    // [Feature #27] List a trip's collaborators
     if (method === 'GET' && path === '/trips/{tripId}/collaborators') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -966,6 +1314,7 @@ exports.handler = async (event) => {
       });
     }
 
+    // [Feature #27] Remove a collaborator (owner only)
     if (method === 'DELETE' && path === '/trips/{tripId}/invite/{userId}') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       const target = event.pathParameters && event.pathParameters.userId;
@@ -1021,6 +1370,7 @@ exports.handler = async (event) => {
       return noContent();
     }
 
+    // [Feature #20] Run AI route optimization for this trip
     if (method === 'POST' && path === '/trips/{tripId}/optimize') {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
@@ -1038,12 +1388,14 @@ exports.handler = async (event) => {
       }
     }
 
+    // [Feature #19] Calculate real road routes for the map
     if (method === 'POST' && path === '/routes/calculate') {
       const body = parseBody(event);
       const route = await calculateRoute(body);
       return ok(200, route);
     }
 
+    // [Feature #15] Place search proxy (Amazon Location) for stop autocomplete
     if (method === 'GET' && path === '/places/search') {
       const q = (event.queryStringParameters || {}).q || '';
       const biasLng = (event.queryStringParameters || {}).lng;
@@ -1054,6 +1406,7 @@ exports.handler = async (event) => {
 
     /* ─── Trending destinations (read = any signed-in user; write = admin) ─── */
 
+    // [Feature #14] Read trending destinations for the user dashboard (built-in fallback)
     if (method === 'GET' && path === '/trending') {
       const res = await ddb.get({
         TableName: TABLE_NAME,
@@ -1065,6 +1418,7 @@ exports.handler = async (event) => {
       return ok(200, { destinations, updatedAt: res.Item && res.Item.updatedAt });
     }
 
+    // [Feature #50] Admin: replace the trending destinations list
     if (method === 'PUT' && path === '/admin/trending') {
       requireAdmin(event);
       const body = parseBody(event);
@@ -1091,6 +1445,7 @@ exports.handler = async (event) => {
 
     /* ─── Admin: metrics ─── */
 
+    // [Feature #43] Admin: platform metrics (totals, active trips, recent activity feed)
     if (method === 'GET' && path === '/admin/metrics') {
       requireAdmin(event);
 
@@ -1139,6 +1494,7 @@ exports.handler = async (event) => {
 
     /* ─── Admin: users ─── */
 
+    // [Feature #43] Admin: list all users with trip counts and admin flags
     if (method === 'GET' && path === '/admin/users') {
       requireAdmin(event);
 
@@ -1172,6 +1528,7 @@ exports.handler = async (event) => {
       return ok(200, { items, count: items.length });
     }
 
+    // [Feature #44] Admin: suspend (disable) a user's Cognito account
     if (method === 'POST' && path === '/admin/users/{userId}/suspend') {
       requireAdmin(event);
       const targetSub = event.pathParameters && event.pathParameters.userId;
@@ -1181,6 +1538,7 @@ exports.handler = async (event) => {
       return ok(200, { userId: targetSub, enabled: false });
     }
 
+    // [Feature #44] Admin: unsuspend (re-enable) a user's Cognito account
     if (method === 'POST' && path === '/admin/users/{userId}/unsuspend') {
       requireAdmin(event);
       const targetSub = event.pathParameters && event.pathParameters.userId;
@@ -1190,6 +1548,7 @@ exports.handler = async (event) => {
       return ok(200, { userId: targetSub, enabled: true });
     }
 
+    // [Feature #45] Admin: promote a user into the Cognito "Admins" group
     if (method === 'POST' && path === '/admin/users/{userId}/promote') {
       requireAdmin(event);
       const targetSub = event.pathParameters && event.pathParameters.userId;
@@ -1203,6 +1562,7 @@ exports.handler = async (event) => {
       return ok(200, { userId: targetSub, isAdmin: true });
     }
 
+    // [Feature #45] Admin: demote a user (guards against removing the last admin)
     if (method === 'POST' && path === '/admin/users/{userId}/demote') {
       requireAdmin(event);
       const targetSub = event.pathParameters && event.pathParameters.userId;
@@ -1220,6 +1580,7 @@ exports.handler = async (event) => {
       return ok(200, { userId: targetSub, isAdmin: false });
     }
 
+    // [Feature #46] Admin: delete a user — purge their DynamoDB partition + Cognito user
     if (method === 'DELETE' && path === '/admin/users/{userId}') {
       requireAdmin(event);
       const targetSub = event.pathParameters && event.pathParameters.userId;
@@ -1253,6 +1614,7 @@ exports.handler = async (event) => {
 
     /* ─── Admin: trip moderation ─── */
 
+    // [Feature #47] Admin: list/search all trips with owner emails
     if (method === 'GET' && path === '/admin/trips') {
       requireAdmin(event);
       const q = ((event.queryStringParameters || {}).q || '').toLowerCase().trim();
@@ -1295,6 +1657,7 @@ exports.handler = async (event) => {
       return ok(200, { items, count: items.length });
     }
 
+    // [Feature #49] Admin: soft-delete any trip
     if (method === 'DELETE' && path === '/admin/trips/{tripId}') {
       requireAdmin(event);
       const tripId = event.pathParameters && event.pathParameters.tripId;
@@ -1310,6 +1673,7 @@ exports.handler = async (event) => {
       return noContent();
     }
 
+    // [Feature #48] Admin: hide / unhide a trip
     if (method === 'POST' && path === '/admin/trips/{tripId}/hide') {
       requireAdmin(event);
       const tripId = event.pathParameters && event.pathParameters.tripId;
@@ -1327,6 +1691,7 @@ exports.handler = async (event) => {
       return ok(200, { tripId, hidden });
     }
 
+    // [Feature #6][Feature #7] Read the user's saved preferences
     if (method === 'GET' && path === '/user/prefs') {
       const res = await ddb.get({
         TableName: TABLE_NAME,
@@ -1335,6 +1700,7 @@ exports.handler = async (event) => {
       return ok(200, res.Item || {});
     }
 
+    // [Feature #5][Feature #6][Feature #7] Save profile, regional prefs & notification toggles
     if (method === 'PUT' && path === '/user/prefs') {
       const body  = parseBody(event);
       const email = getUserEmail(event);

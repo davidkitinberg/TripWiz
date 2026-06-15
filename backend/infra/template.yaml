@@ -142,6 +142,32 @@ Resources:
         gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
         gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
 
+  TripWizDocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods:
+              - PUT
+              - GET
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            AllowedHeaders:
+              - '*'
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+
   TripRestFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -161,9 +187,19 @@ Resources:
           ROUTE_CALCULATOR_NAME: !Ref TripWizRouteCalculator
           WS_ENDPOINT: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
           ADMIN_EMAILS: !Ref AdminBootstrapEmails
+          DOCUMENTS_BUCKET: !Ref TripWizDocumentsBucket
+          SOURCE_EMAIL: !Ref SourceEmail
+          FRONTEND_URL: !Ref FrontendUrl
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TripWizTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub "${TripWizDocumentsBucket.Arn}/trip-documents/*"
         - Statement:
             Effect: Allow
             Action:
@@ -209,6 +245,11 @@ Resources:
               - execute-api:ManageConnections
             Resource:
               - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*"
+        - Statement:
+            Effect: Allow
+            Action:
+              - ses:SendEmail
+            Resource: '*'
       Events:
         GetTrips:
           Type: Api
@@ -239,6 +280,36 @@ Resources:
           Properties:
             RestApiId: !Ref TripWizApi
             Path: /trips/{tripId}
+            Method: DELETE
+        ListTripAttachments:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments
+            Method: GET
+        CreateTripAttachmentUploadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments/upload-url
+            Method: POST
+        CompleteTripAttachmentUpload:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments/{fileId}/complete
+            Method: POST
+        GetTripAttachmentDownloadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments/{fileId}/download-url
+            Method: GET
+        DeleteTripAttachment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TripWizApi
+            Path: /trips/{tripId}/attachments/{fileId}
             Method: DELETE
         ValidateTrip:
           Type: Api
@@ -572,12 +643,36 @@ Resources:
           Properties:
             Topic: !Ref AlertsTopic
 
+  PostConfirmationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: TripWiz-PostConfirmation
+      CodeUri: ../src/
+      Handler: post_confirmation/index.handler
+      Runtime: nodejs24.x
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TripWizTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TripWizTable
+
+  PostConfirmationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PostConfirmationFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt TripWizUserPool.Arn
+
   TripWizUserPool:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: TripWizUserPool
       AutoVerifiedAttributes:
         - email
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFunction.Arn
 
   TripWizUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
@@ -613,6 +708,10 @@ Parameters:
     Type: Number
     Default: 2
     Description: Days before a trip starts to send the reminder email (default 2 = 48 hours notice)
+  FrontendUrl:
+    Type: String
+    Default: https://tripwiz.app
+    Description: Public frontend base URL used in transactional emails (trip invites, etc.)
 
 Outputs:
   TripWizTableName:

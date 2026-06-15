@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ShieldAlert } from 'lucide-react';
 
+// [Feature #42] 403 page shown when a non-admin tries to reach the admin portal
 export default function UnauthorizedPage() {
   const navigate = useNavigate();
   return (

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MoreHorizontal, EyeOff, Eye, Trash2, Search, X, MapPin, Calendar } from 'lucide-react';
+import { MoreVertical, EyeOff, Eye, Trash2, Search, X, MapPin, Calendar } from 'lucide-react';
 import { api } from '../services/api';
 
 function useDebounce(value, ms = 350) {
@@ -13,6 +13,7 @@ function fmtDate(d) {
   return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// [Feature #47] Trip moderation — preview a trip's itinerary in a modal
 function TripPreviewModal({ trip, onClose, onDelete, acting }) {
   return (
     <div className="admin-modal-backdrop" onClick={onClose}>
@@ -100,6 +101,7 @@ export default function AdminTripsPage() {
       .finally(() => setLoading(false));
   };
 
+  // [Feature #47] Trip moderation — list & debounced search by title/owner email
   useEffect(() => { load(debouncedQuery); }, [debouncedQuery]);
 
   useEffect(() => {
@@ -125,6 +127,7 @@ export default function AdminTripsPage() {
     }
   }
 
+  // [Feature #48] Hide / unhide a trip for moderation
   function handleHide(t) {
     const next = !t.hidden;
     runAction(api.hideAdminTrip(t.tripId, next), () =>
@@ -132,6 +135,7 @@ export default function AdminTripsPage() {
     );
   }
 
+  // [Feature #49] Delete a trip from the platform (admin moderation)
   function handleDelete(t) {
     runAction(api.deleteAdminTrip(t.tripId), () =>
       setTrips((prev) => prev.filter((x) => x.tripId !== t.tripId))
@@ -203,9 +207,10 @@ export default function AdminTripsPage() {
                     <button
                       className="admin-icon-btn"
                       onClick={() => setMenuOpenId(menuOpenId === t.tripId ? null : t.tripId)}
-                      aria-label="Actions"
+                      aria-label="Trip actions"
+                      title="Trip actions"
                     >
-                      <MoreHorizontal size={18} />
+                      <MoreVertical size={16} strokeWidth={2.25} aria-hidden="true" />
                     </button>
                     {menuOpenId === t.tripId && (
                       <div className="admin-action-menu">

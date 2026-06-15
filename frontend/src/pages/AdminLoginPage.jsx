@@ -11,6 +11,7 @@ export default function AdminLoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // [Feature #42] Admin sign-in — authenticate, then verify admin rights or sign out
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');

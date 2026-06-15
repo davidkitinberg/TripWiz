@@ -5,6 +5,7 @@ import HomePage from './pages/HomePage';
 import LoginPage from './pages/LoginPage';
 import TripsPage from './pages/TripsPage';
 import TripPage from './pages/TripPage';
+import TripOverviewPage from './pages/TripOverviewPage';
 import AccountSettings from './pages/AccountSettings';
 import AdminLoginPage from './pages/AdminLoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
@@ -15,6 +16,7 @@ import AdminUsersPage from './pages/AdminUsersPage';
 import AdminTripsPage from './pages/AdminTripsPage';
 import AdminTrendingPage from './pages/AdminTrendingPage';
 
+// [Feature #4] Protected routes — redirect to /login unless a valid session exists
 function PrivateRoute({ children }) {
   const [auth, setAuth] = useState(null);
   const location = useLocation();
@@ -44,6 +46,14 @@ export default function App() {
           element={
             <PrivateRoute>
               <TripsPage />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/trips/:tripId/overview"
+          element={
+            <PrivateRoute>
+              <TripOverviewPage />
             </PrivateRoute>
           }
         />

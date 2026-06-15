@@ -23,6 +23,8 @@ function BoundsUpdater({ allPoints }) {
   return null;
 }
 
+// [Feature #19] Interactive Leaflet map: numbered day-colored markers + real road
+// route polylines (Amazon Location), falling back to dashed straight lines.
 export default function TripMap({ dayGroups }) {
   const allPoints = dayGroups.flatMap((g) => g.points);
   const defaultCenter = allPoints.length > 0 ? [allPoints[0].lat, allPoints[0].lng] : [20, 0];
