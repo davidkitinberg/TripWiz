@@ -8,6 +8,7 @@ const cognito = new AWS.CognitoIdentityServiceProvider();
 const bedrock = new AWS.BedrockRuntime();
 const location = new AWS.Location();
 const s3 = new AWS.S3();
+const ses = new AWS.SES();
 
 const TABLE_NAME = process.env.TABLE_NAME;
 const VALIDATE_FUNCTION_NAME = process.env.VALIDATE_FUNCTION_NAME;
@@ -18,6 +19,8 @@ const PLACE_INDEX_NAME = process.env.PLACE_INDEX_NAME || 'TripWizPlaceIndex';
 const ROUTE_CALCULATOR_NAME = process.env.ROUTE_CALCULATOR_NAME || 'TripWizRouteCalculator';
 const WS_ENDPOINT = process.env.WS_ENDPOINT;
 const DOCUMENTS_BUCKET = process.env.DOCUMENTS_BUCKET;
+const SOURCE_EMAIL = process.env.SOURCE_EMAIL;
+const FRONTEND_URL = String(process.env.FRONTEND_URL || 'https://tripwiz.app').replace(/\/$/, '');
 const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_TYPES = new Map([
   ['application/pdf', ['pdf']],
@@ -449,6 +452,78 @@ async function lookupUserByEmail(email) {
   const sub = (attrs.find((a) => a.Name === 'sub') || {}).Value;
   const userEmail = (attrs.find((a) => a.Name === 'email') || {}).Value;
   return sub ? { userId: sub, email: (userEmail || email).toLowerCase() } : null;
+}
+
+function formatTripDate(iso) {
+  if (!iso) return null;
+  return new Date(iso).toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+  });
+}
+
+function buildCollaboratorInviteEmailHtml({ tripTitle, tripId, inviterEmail, role, startDate, endDate }) {
+  const tripUrl = `${FRONTEND_URL}/trips/${tripId}`;
+  const roleLabel = role === 'editor' ? 'Editor' : 'Viewer';
+  const dateLine = startDate
+    ? `<p style="color:#4b5563;margin:0 0 16px;">Dates: <strong>${formatTripDate(startDate)}</strong>${endDate ? ` – <strong>${formatTripDate(endDate)}</strong>` : ''}</p>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:24px;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);border-radius:14px 14px 0 0;padding:36px 32px;text-align:center;">
+      <p style="color:rgba(255,255,255,0.7);font-size:12px;margin:0 0 6px;letter-spacing:1.5px;text-transform:uppercase;">TripWiz</p>
+      <h1 style="color:#fff;margin:0;font-size:26px;font-weight:700;">You've been invited to a trip</h1>
+    </div>
+    <div style="background:#fff;border-radius:0 0 14px 14px;padding:32px;">
+      <p style="color:#4b5563;margin:0 0 16px;line-height:1.6;">
+        <strong>${inviterEmail}</strong> invited you to collaborate on
+        <strong>${tripTitle}</strong> as an <strong>${roleLabel}</strong>.
+      </p>
+      ${dateLine}
+      <p style="color:#4b5563;margin:0 0 24px;line-height:1.6;">
+        Sign in to TripWiz to view the itinerary, edit stops together in real time, and help plan the trip.
+      </p>
+      <div style="text-align:center;">
+        <a href="${tripUrl}"
+           style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;padding:13px 32px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">
+          Open Trip
+        </a>
+      </div>
+    </div>
+    <p style="text-align:center;color:#9ca3af;font-size:12px;margin-top:16px;">
+      You received this because a TripWiz user shared a trip with your account.
+    </p>
+  </div>
+</body>
+</html>`;
+}
+
+async function sendCollaboratorInviteEmail({ toEmail, tripTitle, tripId, inviterEmail, role, startDate, endDate }) {
+  if (!SOURCE_EMAIL) {
+    console.warn('SOURCE_EMAIL not configured — skipping collaborator invite email');
+    return;
+  }
+
+  const subject = `You're invited to plan "${tripTitle}" on TripWiz`;
+  const html = buildCollaboratorInviteEmailHtml({
+    tripTitle,
+    tripId,
+    inviterEmail,
+    role,
+    startDate,
+    endDate
+  });
+
+  await ses.sendEmail({
+    Source: SOURCE_EMAIL,
+    Destination: { ToAddresses: [toEmail] },
+    Message: {
+      Subject: { Data: subject, Charset: 'UTF-8' },
+      Body: { Html: { Data: html, Charset: 'UTF-8' } }
+    }
+  }).promise();
 }
 
 async function getSecretJson(secretArn) {
@@ -1192,6 +1267,20 @@ exports.handler = async (event) => {
           addedAt: now
         }
       ]);
+
+      try {
+        await sendCollaboratorInviteEmail({
+          toEmail: invited.email,
+          tripTitle: trip.title || 'Untitled Trip',
+          tripId,
+          inviterEmail: getUserEmail(event) || 'A TripWiz user',
+          role: 'editor',
+          startDate: trip.startDate,
+          endDate: trip.endDate
+        });
+      } catch (err) {
+        console.warn(`Collaborator invite email failed for trip=${tripId} to=${invited.email}:`, err.message);
+      }
 
       return ok(200, {
         collaborator: { userId: invited.userId, email: invited.email, role: 'editor', addedAt: now }

@@ -6105,19 +6105,31 @@ h1, h2, h3, h4, h5, h6 {
 .admin-icon-btn {
   background: rgba(255,255,255,0.075);
   border: 1px solid rgba(255,255,255,0.14);
-  width: 34px; height: 34px; border-radius: 0.625rem;
-  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 0.625rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: rgba(248,250,252,0.78);
   cursor: pointer;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 1px 2px rgba(0,0,0,0.22);
   transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
 }
+
 .admin-icon-btn:hover {
   background: rgba(99,102,241,0.18);
   color: #f8fafc;
   border-color: rgba(129,140,248,0.45);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 8px 22px rgba(15,23,42,0.35);
 }
+
+.admin-icon-btn svg {
+  display: block;
+  stroke: currentColor;
+  flex-shrink: 0;
+}
+
 .admin-icon-btn:focus-visible {
   outline: none;
   border-color: rgba(129,140,248,0.7);

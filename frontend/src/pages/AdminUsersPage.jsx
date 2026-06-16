@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MoreHorizontal, UserX, UserCheck, Trash2 } from 'lucide-react';
+import { MoreVertical, ShieldCheck, ShieldOff, UserX, UserCheck, Trash2, Eye } from 'lucide-react';
 import { api } from '../services/api';
 
 function fmtDate(d) {
@@ -117,9 +117,10 @@ export default function AdminUsersPage() {
                     <button
                       className="admin-icon-btn"
                       onClick={() => setMenuOpenId(menuOpenId === u.userId ? null : u.userId)}
-                      aria-label="Actions"
+                      aria-label="User actions"
+                      title="User actions"
                     >
-                      <MoreHorizontal size={18} />
+                      <MoreVertical size={16} strokeWidth={2.25} aria-hidden="true" />
                     </button>
                     {menuOpenId === u.userId && (
                       <div className="admin-action-menu">
