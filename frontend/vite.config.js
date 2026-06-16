@@ -6,4 +6,8 @@ export default defineConfig({
   define: {
     global: 'globalThis',
   },
+  server: {
+    host: true,
+    port: 5173,
+  },
 });

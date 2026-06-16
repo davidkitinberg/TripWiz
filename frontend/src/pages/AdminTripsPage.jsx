@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MoreHorizontal, Eye, Trash2, Search } from 'lucide-react';
 import { MoreVertical, EyeOff, Eye, Trash2, Search, X, MapPin, Calendar } from 'lucide-react';
 import { api } from '../services/api';
 
