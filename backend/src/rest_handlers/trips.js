@@ -576,7 +576,7 @@ async function optimizeWithBedrock(itinerary) {
       dayIndex: s.dayIndex || 0,
       lat: s.coords.lat,
       lng: s.coords.lng,
-      durationHours: s.notes || '2'
+      durationHours: s.duration || s.notes || '2'
     };
   });
 

@@ -22,22 +22,32 @@ const HEAT_ALERT_C    = 35;  // dangerous heat for ANY outdoor activity
 const BEACH_MIN_C     = 24;  // below this = too cold for beach
 const SKI_WARM_MAX_C  = 5;   // above this without snow forecast = poor ski conditions
 
-// Wind speed (km/h)
-const WIND_ALERT_KMH     = 50;  // general outdoor — uncomfortable/dangerous
-const SKI_WIND_ALERT_KMH = 70;  // ski lifts typically close above this
+// Wind speed
+const KMH_PER_KNOT          = 1.852;
+const WIND_ALERT_KNOTS      = 10;  // general outdoor — uncomfortable/dangerous
+const WIND_GUST_ALERT_KNOTS = 15;  // general outdoor — uncomfortable/dangerous
+const SKI_WIND_ALERT_KNOTS  = 20;  // ski lifts may be suspended
+const SKI_WIND_GUST_ALERT_KNOTS = 25;  // ski lifts may be suspended
+const SCENIC_CLOUD_ALERT_OKTAS = 6;  // scenic visibility alert threshold
 
 // Fallback indoor suggestions (used when an alert fires for an outdoor slot)
 const FALLBACK_SEARCH_TERMS = ['museum', 'gallery', 'shopping mall', 'cinema', 'aquarium'];
 
 // ─── Activity keywords ────────────────────────────────────────────────────────
 
-const SKI_KEYWORDS    = ['ski', 'skiing', 'snowboard', 'snowboarding', 'slopes', 'piste', 'gondola'];
+const SKI_KEYWORDS    = ['ski', 'skiing', 'snowboard', 'snowboarding', 'slopes', 'piste'];
 const BEACH_KEYWORDS  = ['beach', 'coast', 'coastal', 'shore', 'snorkel', 'surf', 'sunbath', 'sunbathe', 'swim', 'swimming', 'waterpark', 'water park'];
+const SCENIC_VIEW_KEYWORDS = [
+  'viewpoint', 'lookout', 'observation deck', 'observatory',
+  'panorama', 'panoramic', 'scenic', 'summit', 'mountain view',
+  'tower', 'cable car', 'gondola', 'ropeway', 'funicular',
+];
 const INDOOR_KEYWORDS = [
   'museum', 'gallery', 'mall', 'cinema', 'theater', 'theatre',
   'restaurant', 'cafe', 'bar', 'pub', 'hotel', 'airport',
   'train station', 'aquarium', 'shopping', 'spa', 'indoor',
 ];
+const MANUAL_ACTIVITY_TYPES = new Set(['GENERAL_OUTDOOR', 'INDOOR', 'BEACH', 'SKI', 'SCENIC_VIEW']);
 
 // ─── WMO weather interpretation codes ────────────────────────────────────────
 
@@ -62,13 +72,30 @@ async function fetchForecast(lat, lon) {
   const url = [
     'https://api.open-meteo.com/v1/forecast',
     `?latitude=${lat}&longitude=${lon}`,
-    '&hourly=temperature_2m,apparent_temperature,weathercode,windspeed_10m,relativehumidity_2m,precipitation_probability',
+    '&hourly=temperature_2m,apparent_temperature,weathercode,windspeed_10m,wind_gusts_10m,relativehumidity_2m,precipitation_probability,cloud_cover',
     '&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+    '&wind_speed_unit=kn',
     '&timezone=auto&forecast_days=16',
   ].join('');
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Open-Meteo error ${res.status}`);
   return res.json();
+}
+
+function windToKnots(value, unit) {
+  if (value == null) return null;
+  const normalizedUnit = String(unit || '').toLowerCase();
+  if (normalizedUnit.includes('km/h')) return value / KMH_PER_KNOT;
+  return value;
+}
+
+function normalizeCloudCover(value) {
+  if (value == null) return { cloudCoverPercent: null, cloudCoverOktas: null };
+  const cloudCoverPercent = Math.round(value);
+  return {
+    cloudCoverPercent,
+    cloudCoverOktas: Math.round(cloudCoverPercent / 12.5),
+  };
 }
 
 // ─── Forecast lookup ──────────────────────────────────────────────────────────
@@ -101,6 +128,9 @@ function findForecastForTimestamp(forecast, timestampSec) {
       if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
     }
     const { condition, description } = wmoToCondition(hourly.weathercode[bestIdx]);
+    const windSpeedKnots = windToKnots(hourly.windspeed_10m?.[bestIdx], forecast.hourly_units?.windspeed_10m);
+    const windGustsKnots = windToKnots(hourly.wind_gusts_10m?.[bestIdx], forecast.hourly_units?.wind_gusts_10m);
+    const { cloudCoverPercent, cloudCoverOktas } = normalizeCloudCover(hourly.cloud_cover?.[bestIdx]);
     return {
       tempC:      Math.round(hourly.temperature_2m[bestIdx]),
       feelsLikeC: Math.round(hourly.apparent_temperature[bestIdx]),
@@ -111,7 +141,11 @@ function findForecastForTimestamp(forecast, timestampSec) {
       icon:       '',
       pop:        (hourly.precipitation_probability[bestIdx] || 0) / 100,
       humidity:   hourly.relativehumidity_2m[bestIdx] ?? null,
-      windSpeed:  hourly.windspeed_10m[bestIdx] ?? null,
+      windSpeed:  windSpeedKnots,
+      windSpeedKnots,
+      windGustsKnots,
+      cloudCoverPercent,
+      cloudCoverOktas,
       source:     'hourly',
     };
   }
@@ -138,6 +172,10 @@ function findForecastForTimestamp(forecast, timestampSec) {
       pop:        (daily.precipitation_probability_max[bestIdx] || 0) / 100,
       humidity:   null,
       windSpeed:  null,
+      windSpeedKnots: null,
+      windGustsKnots: null,
+      cloudCoverPercent: null,
+      cloudCoverOktas: null,
       source:     'daily',
     };
   }
@@ -150,6 +188,11 @@ function findForecastForTimestamp(forecast, timestampSec) {
 
 // [Feature #23] Categorize a stop's activity (SKI / BEACH / INDOOR / GENERAL_OUTDOOR)
 function categorizeActivity(slot, item) {
+  const manualActivityType = String(slot.activityType || '').toUpperCase();
+  if (manualActivityType && manualActivityType !== 'AUTO' && MANUAL_ACTIVITY_TYPES.has(manualActivityType)) {
+    return manualActivityType;
+  }
+
   if (slot.indoor === true || (item && item.indoor === true)) return 'INDOOR';
 
   const text = [
@@ -162,6 +205,7 @@ function categorizeActivity(slot, item) {
 
   if (SKI_KEYWORDS.some((k) => text.includes(k)))    return 'SKI';
   if (BEACH_KEYWORDS.some((k) => text.includes(k)))  return 'BEACH';
+  if (SCENIC_VIEW_KEYWORDS.some((k) => text.includes(k))) return 'SCENIC_VIEW';
   if (INDOOR_KEYWORDS.some((k) => text.includes(k))) return 'INDOOR';
   return 'GENERAL_OUTDOOR';
 }
@@ -171,6 +215,34 @@ function categorizeActivity(slot, item) {
 
 function toF(c) { return Math.round(c * 9 / 5 + 32); }
 
+function assessGeneralOutdoorWeather(fw, isRain, isStorm, windSpeedKnots, windGustsKnots) {
+  if (isStorm) {
+    return {
+      isAlert: true,
+      reason: `Thunderstorm forecast (${Math.round(fw.pop * 100)}% precipitation chance) - outdoor activity not recommended`,
+    };
+  }
+  if (isRain && fw.pop >= RAIN_PROB_OUTDOOR) {
+    return {
+      isAlert: true,
+      reason: `${Math.round(fw.pop * 100)}% chance of ${fw.description || 'rain'} - outdoor activity may be disrupted`,
+    };
+  }
+  if (windSpeedKnots >= WIND_ALERT_KNOTS) {
+    return {
+      isAlert: true,
+      reason: `Wind speed is ${WIND_ALERT_KNOTS} knots or higher (${Math.round(windSpeedKnots)} knots) - outdoor activity may be uncomfortable or unsafe`,
+    };
+  }
+  if (windGustsKnots >= WIND_GUST_ALERT_KNOTS) {
+    return {
+      isAlert: true,
+      reason: `Wind gusts are ${WIND_GUST_ALERT_KNOTS} knots or higher (${Math.round(windGustsKnots)} knots) - outdoor activity may be uncomfortable or unsafe`,
+    };
+  }
+  return { isAlert: false, reason: null };
+}
+
 // [Feature #23] Context-aware weather assessment using category-specific thresholds
 function assessWeather(fw, category) {
   if (category === 'INDOOR') return { isAlert: false, reason: null };
@@ -179,7 +251,8 @@ function assessWeather(fw, category) {
   const isSnow  = cond.includes('snow');
   const isRain  = cond.includes('rain') || cond.includes('drizzle');
   const isStorm = cond.includes('storm') || cond.includes('thunder');
-  const wind    = fw.windSpeed || 0;
+  const windSpeedKnots = fw.windSpeedKnots || 0;
+  const windGustsKnots = fw.windGustsKnots || 0;
   const tempMax = fw.tempMaxC != null ? fw.tempMaxC : fw.tempC;
 
   // ── Global: extreme heat overrides all category rules ───────────────────────
@@ -198,10 +271,16 @@ function assessWeather(fw, category) {
         reason: `Too warm for skiing (${tempMax}°C / ${toF(tempMax)}°F) with no snow forecast — expect poor snow conditions`,
       };
     }
-    if (wind > SKI_WIND_ALERT_KMH) {
+    if (windSpeedKnots >= SKI_WIND_ALERT_KNOTS) {
       return {
         isAlert: true,
-        reason: `High winds (${Math.round(wind)} km/h) — ski lifts may be suspended`,
+        reason: `Ski wind speed is ${SKI_WIND_ALERT_KNOTS} knots or higher (${Math.round(windSpeedKnots)} knots) — ski lifts may be suspended`,
+      };
+    }
+    if (windGustsKnots >= SKI_WIND_GUST_ALERT_KNOTS) {
+      return {
+        isAlert: true,
+        reason: `Ski wind gusts are ${SKI_WIND_GUST_ALERT_KNOTS} knots or higher (${Math.round(windGustsKnots)} knots) — ski lifts may be suspended`,
       };
     }
     if (isStorm) {
@@ -237,6 +316,23 @@ function assessWeather(fw, category) {
   }
 
   // ── GENERAL_OUTDOOR ──────────────────────────────────────────────────────────
+  if (category === 'SCENIC_VIEW') {
+    const outdoorAlert = assessGeneralOutdoorWeather(fw, isRain, isStorm, windSpeedKnots, windGustsKnots);
+    if (outdoorAlert.isAlert) return outdoorAlert;
+    if (cond.includes('mist')) {
+      return {
+        isAlert: true,
+        reason: 'Low visibility expected due to fog or mist - the view may be limited.',
+      };
+    }
+    if (fw.cloudCoverOktas != null && fw.cloudCoverOktas >= SCENIC_CLOUD_ALERT_OKTAS) {
+      return {
+        isAlert: true,
+        reason: `Cloud cover is ${SCENIC_CLOUD_ALERT_OKTAS}/8 or higher - visibility at this scenic location may be limited.`,
+      };
+    }
+    return { isAlert: false, reason: null };
+  }
   if (isStorm) {
     return {
       isAlert: true,
@@ -249,10 +345,16 @@ function assessWeather(fw, category) {
       reason: `${Math.round(fw.pop * 100)}% chance of ${fw.description || 'rain'} — outdoor activity may be disrupted`,
     };
   }
-  if (wind > WIND_ALERT_KMH) {
+  if (windSpeedKnots >= WIND_ALERT_KNOTS) {
     return {
       isAlert: true,
-      reason: `High winds (${Math.round(wind)} km/h) — outdoor activity may be uncomfortable or unsafe`,
+      reason: `Wind speed is ${WIND_ALERT_KNOTS} knots or higher (${Math.round(windSpeedKnots)} knots) — outdoor activity may be uncomfortable or unsafe`,
+    };
+  }
+  if (windGustsKnots >= WIND_GUST_ALERT_KNOTS) {
+    return {
+      isAlert: true,
+      reason: `Wind gusts are ${WIND_GUST_ALERT_KNOTS} knots or higher (${Math.round(windGustsKnots)} knots) — outdoor activity may be uncomfortable or unsafe`,
     };
   }
   return { isAlert: false, reason: null };
@@ -358,6 +460,10 @@ async function getWeatherForSlot(trip, slot) {
     pop:            fw.pop,
     humidity:       fw.humidity,
     windSpeed:      fw.windSpeed,
+    windSpeedKnots: fw.windSpeedKnots,
+    windGustsKnots: fw.windGustsKnots,
+    cloudCoverPercent: fw.cloudCoverPercent,
+    cloudCoverOktas: fw.cloudCoverOktas,
     forecastSource: fw.source,
     isAlert,
     reason,
@@ -463,6 +569,10 @@ async function persistWeatherData(tripId, slotId, wd) {
       pop:            wd.pop,
       humidity:       wd.humidity,
       windSpeed:      wd.windSpeed,
+      windSpeedKnots: wd.windSpeedKnots,
+      windGustsKnots: wd.windGustsKnots,
+      cloudCoverPercent: wd.cloudCoverPercent,
+      cloudCoverOktas: wd.cloudCoverOktas,
       forecastSource: wd.forecastSource,
       isAlert:        wd.isAlert,
       reason:         wd.reason || null,
@@ -508,6 +618,8 @@ async function persistAlert(wd, tripId) {
       coords:             wd.coords,
       weatherCondition:   wd.condition,
       precipitationProb:  wd.pop,
+      cloudCoverPercent:  wd.cloudCoverPercent,
+      cloudCoverOktas:    wd.cloudCoverOktas,
       severity:           'warning',
       reason:             wd.reason,
       createdAt:          now.toISOString(),
