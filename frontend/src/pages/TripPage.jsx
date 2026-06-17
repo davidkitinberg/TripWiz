@@ -633,6 +633,7 @@ export default function TripPage() {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState('');
+  const [inviteNotice, setInviteNotice] = useState('');
   const [copyToast, setCopyToast] = useState(false);
   const [removingId, setRemovingId] = useState(null);
 
@@ -1016,6 +1017,7 @@ export default function TripPage() {
     setShowShareModal(false);
     setInviteEmail('');
     setInviteError('');
+    setInviteNotice('');
   }
 
   // [Feature #26] Invite a collaborator by email (grants editor access)
@@ -1025,10 +1027,21 @@ export default function TripPage() {
     if (!email) return;
     setInviting(true);
     setInviteError('');
+    setInviteNotice('');
     try {
       const res = await api.inviteCollaborator(tripId, email);
       setCollaborators((prev) => [...prev, res.collaborator]);
       setInviteEmail('');
+      // The collaborator always gets access; the email is best-effort. Tell the owner
+      // when the notification could not be delivered (most often SES sandbox mode).
+      if (res.emailSent === false) {
+        setInviteNotice(
+          `${res.collaborator.email} now has access, but the invite email could not be sent. ` +
+          'They can open the trip from their TripWiz account. (In SES sandbox mode, emails only reach verified addresses.)'
+        );
+      } else {
+        setInviteNotice(`Invite sent to ${res.collaborator.email}.`);
+      }
     } catch (err) {
       setInviteError(err.message || 'Invite failed');
     } finally {
@@ -1050,11 +1063,29 @@ export default function TripPage() {
     }
   }
 
-  // [Feature #28] Copy the shareable trip link (link openers get viewer access)
+  // [Feature #28] Copy the shareable trip link (link openers get viewer access
+  // only when link sharing is enabled below)
   function handleCopyLink() {
     navigator.clipboard.writeText(window.location.href).catch(() => {});
     setCopyToast(true);
     setTimeout(() => setCopyToast(false), 2000);
+  }
+
+  // [Review #7] Owner toggles whether anyone with the link gets read-only access.
+  // Link sharing is opt-in (default off); the backend gates the link-share fallback
+  // on this flag so an unlisted trip id is no longer enough to view a trip.
+  async function handleToggleShare(next) {
+    try {
+      const res = await api.updateTrip(tripId, { shareEnabled: next, version: versionRef.current });
+      setTrip(res.trip);
+      versionRef.current = res.trip.version;
+    } catch (err) {
+      if (err.code === 'VERSION_CONFLICT') {
+        setInviteError('Trip changed elsewhere — refresh and try again.');
+      } else {
+        setInviteError(err.message || 'Could not update sharing');
+      }
+    }
   }
 
   // [Feature #22] Trigger the weather check (async validate Lambda) and poll for results
@@ -1533,7 +1564,7 @@ export default function TripPage() {
                     type="email"
                     placeholder="name@example.com"
                     value={inviteEmail}
-                    onChange={(e) => { setInviteEmail(e.target.value); setInviteError(''); }}
+                    onChange={(e) => { setInviteEmail(e.target.value); setInviteError(''); setInviteNotice(''); }}
                     disabled={inviting}
                     required
                   />
@@ -1542,6 +1573,7 @@ export default function TripPage() {
                   </button>
                 </form>
                 {inviteError && <div className="share-error">{inviteError}</div>}
+                {inviteNotice && <div className="share-notice">{inviteNotice}</div>}
                 <div className="share-hint">User must already have a TripWiz account.</div>
               </div>
             )}
@@ -1588,6 +1620,16 @@ export default function TripPage() {
 
             <div className="share-section">
               <div className="share-section-label">Or share link</div>
+              {access === 'owner' && (
+                <label className="share-toggle">
+                  <input
+                    type="checkbox"
+                    checked={trip.shareEnabled === true}
+                    onChange={(e) => handleToggleShare(e.target.checked)}
+                  />
+                  <span>Anyone with the link can view this trip</span>
+                </label>
+              )}
               <div className="share-link-row">
                 <input className="share-link-input" type="text" readOnly value={window.location.href} />
                 <button className="share-copy-btn" onClick={handleCopyLink}>
@@ -1595,7 +1637,9 @@ export default function TripPage() {
                 </button>
               </div>
               <div className="share-hint">
-                Anyone with the link still needs an invite to view or edit.
+                {trip.shareEnabled === true
+                  ? 'Link sharing is on — anyone signed in to TripWiz who opens this link gets read-only access. Editing still requires an invite.'
+                  : 'Link sharing is off — people you have not invited cannot open this trip, even with the link.'}
               </div>
             </div>
           </div>

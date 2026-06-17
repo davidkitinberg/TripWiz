@@ -1,5 +1,6 @@
-const AWS = require('aws-sdk');
-const ses = new AWS.SES();
+const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
+
+const ses = new SESClient({});
 
 const SOURCE_EMAIL = process.env.SOURCE_EMAIL;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.SOURCE_EMAIL;
@@ -34,14 +35,14 @@ exports.handler = async (event) => {
 
       const bodyText = buildEmailBody(messageObj);
 
-      await ses.sendEmail({
+      await ses.send(new SendEmailCommand({
         Source: SOURCE_EMAIL,
         Destination: { ToAddresses: [ADMIN_EMAIL] },
         Message: {
           Subject: { Data: subject },
           Body: { Text: { Data: bodyText } }
         }
-      }).promise();
+      }));
       console.log('Email sent for SNS message');
     } catch (err) {
       console.error('Failed to send email for SNS message', err);

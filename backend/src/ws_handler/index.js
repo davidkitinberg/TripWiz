@@ -1,6 +1,12 @@
-const AWS = require('aws-sdk');
+const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, DeleteCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { ApiGatewayManagementApiClient, PostToConnectionCommand } = require('@aws-sdk/client-apigatewaymanagementapi');
 
-const dynamodb = new AWS.DynamoDB.DocumentClient();
+// [Review #3] Shared trip-access resolver — same rules as the REST handler (was a
+// separate, drifting copy here that lacked the link-share fallback).
+const { resolveTripForUser } = require('../lib/access');
+
+const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const TABLE_NAME = process.env.TABLE_NAME;
 const CONNECTION_TTL_SECONDS = 24 * 60 * 60;
@@ -25,60 +31,34 @@ function connectionTtl() {
 }
 
 async function getConnection(connectionId) {
-  const res = await dynamodb.get({
+  const res = await dynamodb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { PK: `CONN#${connectionId}`, SK: 'META' }
-  }).promise();
+  }));
   return res.Item || null;
 }
 
-async function getTripAccess(userId, tripId) {
-  const ownerTrip = await dynamodb.get({
-    TableName: TABLE_NAME,
-    Key: { PK: `USER#${userId}`, SK: `TRIP#${tripId}` }
-  }).promise();
-
-  if (ownerTrip.Item && ownerTrip.Item.entityType === 'Trip' && !ownerTrip.Item.deleted) {
-    return { role: 'owner', ownerId: userId, trip: ownerTrip.Item };
-  }
-
-  const access = await dynamodb.get({
-    TableName: TABLE_NAME,
-    Key: { PK: `TRIP#${tripId}`, SK: `ACCESS#${userId}` }
-  }).promise();
-
-  if (!access.Item) return null;
-
-  const trip = await dynamodb.get({
-    TableName: TABLE_NAME,
-    Key: { PK: `USER#${access.Item.ownerId}`, SK: `TRIP#${tripId}` }
-  }).promise();
-
-  if (!trip.Item || trip.Item.deleted) return null;
-  return { role: access.Item.role, ownerId: access.Item.ownerId, trip: trip.Item };
-}
-
 async function broadcast(domain, stage, tripId, payload, skipConnectionId) {
-  const connections = await dynamodb.query({
+  const connections = await dynamodb.send(new QueryCommand({
     TableName: TABLE_NAME,
     KeyConditionExpression: 'PK = :pk',
     ExpressionAttributeValues: { ':pk': `CONN#TRIP#${tripId}` }
-  }).promise();
+  }));
 
-  const api = new AWS.ApiGatewayManagementApi({ endpoint: `https://${domain}/${stage}` });
+  const api = new ApiGatewayManagementApiClient({ endpoint: `https://${domain}/${stage}` });
   await Promise.all((connections.Items || []).map(async (connection) => {
     if (connection.connectionId === skipConnectionId) return;
     try {
-      await api.postToConnection({
+      await api.send(new PostToConnectionCommand({
         ConnectionId: connection.connectionId,
         Data: JSON.stringify(payload)
-      }).promise();
+      }));
     } catch (err) {
-      if (err.statusCode === 410) {
-        await dynamodb.delete({
+      if (err.statusCode === 410 || err.$metadata?.httpStatusCode === 410) {
+        await dynamodb.send(new DeleteCommand({
           TableName: TABLE_NAME,
           Key: { PK: `CONN#TRIP#${tripId}`, SK: `CONN#${connection.connectionId}` }
-        }).promise();
+        }));
       } else {
         throw err;
       }
@@ -149,7 +129,7 @@ exports.handler = async (event) => {
 
   if (routeKey === '$connect') {
     if (!userId) return json(401, { error: { code: 'UNAUTHORIZED', message: 'Cognito identity is required' } });
-    await dynamodb.put({
+    await dynamodb.send(new PutCommand({
       TableName: TABLE_NAME,
       Item: {
         PK: `CONN#${connectionId}`,
@@ -161,7 +141,7 @@ exports.handler = async (event) => {
         ttl: connectionTtl(),
         connectedAt: new Date().toISOString()
       }
-    }).promise();
+    }));
     return json(200, { connected: true });
   }
 
@@ -171,14 +151,14 @@ exports.handler = async (event) => {
 
   if (routeKey === '$disconnect') {
     const joinedTrips = (connection && connection.joinedTrips) || [];
-    await Promise.all(joinedTrips.map((tripId) => dynamodb.delete({
+    await Promise.all(joinedTrips.map((tripId) => dynamodb.send(new DeleteCommand({
       TableName: TABLE_NAME,
       Key: { PK: `CONN#TRIP#${tripId}`, SK: `CONN#${connectionId}` }
-    }).promise()));
-    await dynamodb.delete({
+    }))));
+    await dynamodb.send(new DeleteCommand({
       TableName: TABLE_NAME,
       Key: { PK: `CONN#${connectionId}`, SK: 'META' }
-    }).promise();
+    }));
     return json(200, { disconnected: true });
   }
 
@@ -189,11 +169,12 @@ exports.handler = async (event) => {
 
   if (!body.tripId) return json(400, { error: { code: 'BAD_REQUEST', message: 'tripId is required' } });
 
-  const access = await getTripAccess(userId, body.tripId);
-  if (!access) return json(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this trip' } });
+  const resolved = await resolveTripForUser(userId, body.tripId);
+  if (!resolved) return json(403, { error: { code: 'FORBIDDEN', message: 'You do not have access to this trip' } });
+  const access = resolved.access;
 
   if (action === 'join') {
-    await dynamodb.put({
+    await dynamodb.send(new PutCommand({
       TableName: TABLE_NAME,
       Item: {
         PK: `CONN#TRIP#${body.tripId}`,
@@ -205,28 +186,28 @@ exports.handler = async (event) => {
         ttl: connectionTtl(),
         joinedAt: new Date().toISOString()
       }
-    }).promise();
+    }));
 
-    await dynamodb.update({
+    await dynamodb.send(new UpdateCommand({
       TableName: TABLE_NAME,
       Key: { PK: `CONN#${connectionId}`, SK: 'META' },
       UpdateExpression: 'SET joinedTrips = list_append(if_not_exists(joinedTrips, :empty), :tripList), ttl = :ttl ADD joinedTripSet :tripSet',
       ExpressionAttributeValues: {
-        ':tripSet': dynamodb.createSet([body.tripId]),
+        ':tripSet': new Set([body.tripId]),
         ':tripList': [body.tripId],
         ':empty': [],
         ':ttl': connectionTtl()
       }
-    }).promise();
+    }));
 
     return json(200, { joined: true, tripId: body.tripId });
   }
 
   if (action === 'leave') {
-    await dynamodb.delete({
+    await dynamodb.send(new DeleteCommand({
       TableName: TABLE_NAME,
       Key: { PK: `CONN#TRIP#${body.tripId}`, SK: `CONN#${connectionId}` }
-    }).promise();
+    }));
     return json(200, { left: true, tripId: body.tripId });
   }
 
@@ -248,11 +229,11 @@ exports.handler = async (event) => {
 
     try {
       const update = buildEditUpdate(body.payload || {});
-      const result = await dynamodb.update({
+      const result = await dynamodb.send(new UpdateCommand({
         TableName: TABLE_NAME,
         Key: { PK: `USER#${access.ownerId}`, SK: `TRIP#${body.tripId}` },
         ...update
-      }).promise();
+      }));
 
       const message = {
         action: 'edit',
@@ -267,7 +248,7 @@ exports.handler = async (event) => {
       await broadcast(domain, stage, body.tripId, message, connectionId);
       return json(200, message);
     } catch (err) {
-      if (err.code === 'ConditionalCheckFailedException') {
+      if (err.name === 'ConditionalCheckFailedException') {
         return json(409, { error: { code: 'VERSION_CONFLICT', message: 'Trip version conflict' } });
       }
       return json(err.statusCode || 500, { error: { code: 'EDIT_FAILED', message: err.message } });

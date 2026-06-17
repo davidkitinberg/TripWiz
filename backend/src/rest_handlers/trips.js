@@ -1,26 +1,38 @@
-const AWS = require('aws-sdk');
-const fetch = require('node-fetch');
+const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, DeleteCommand, QueryCommand, BatchWriteCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
+const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+const { CognitoIdentityProviderClient, ListUsersCommand, ListUsersInGroupCommand, AdminDisableUserCommand, AdminEnableUserCommand, AdminAddUserToGroupCommand, AdminRemoveUserFromGroupCommand, AdminDeleteUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
+const { LocationClient, SearchPlaceIndexForTextCommand, CalculateRouteCommand } = require('@aws-sdk/client-location');
+const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { ApiGatewayManagementApiClient, PostToConnectionCommand } = require('@aws-sdk/client-apigatewaymanagementapi');
 
-const ddb = new AWS.DynamoDB.DocumentClient();
-const lambda = new AWS.Lambda();
-const secrets = new AWS.SecretsManager();
-const cognito = new AWS.CognitoIdentityServiceProvider();
-const bedrock = new AWS.BedrockRuntime();
-const location = new AWS.Location();
-const s3 = new AWS.S3();
-const ses = new AWS.SES();
+// [Review #3] Shared helpers — single source of truth across Lambdas
+const { ok, noContent, fail, corsHeaders, parseBody } = require('../lib/http');
+const { uuid } = require('../lib/ids');
+const { resolveTripForUser } = require('../lib/access');
+const { tripGsiPk, queryAllTrips, findTripById } = require('../lib/trips-index');
+const { sendCollaboratorInviteEmail } = require('../lib/email');
+const { optimizeWithBedrock } = require('../lib/optimize');
+
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const lambdaClient = new LambdaClient({});
+const secretsClient = new SecretsManagerClient({});
+const cognito = new CognitoIdentityProviderClient({});
+const location = new LocationClient({});
+const s3 = new S3Client({});
+// [Review #2] bedrock + ses clients moved into ../lib/optimize and ../lib/email
+// respectively, along with the SOURCE_EMAIL / FRONTEND_URL / BEDROCK_MODEL_ID they used.
 
 const TABLE_NAME = process.env.TABLE_NAME;
 const VALIDATE_FUNCTION_NAME = process.env.VALIDATE_FUNCTION_NAME;
 const MAPPING_SECRET_ARN = process.env.MAPPING_SECRET_ARN;
 const USER_POOL_ID = process.env.USER_POOL_ID;
-const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
 const PLACE_INDEX_NAME = process.env.PLACE_INDEX_NAME || 'TripWizPlaceIndex';
 const ROUTE_CALCULATOR_NAME = process.env.ROUTE_CALCULATOR_NAME || 'TripWizRouteCalculator';
 const WS_ENDPOINT = process.env.WS_ENDPOINT;
 const DOCUMENTS_BUCKET = process.env.DOCUMENTS_BUCKET;
-const SOURCE_EMAIL = process.env.SOURCE_EMAIL;
-const FRONTEND_URL = String(process.env.FRONTEND_URL || 'https://tripwiz.app').replace(/\/$/, '');
 const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_TYPES = new Map([
   ['application/pdf', ['pdf']],
@@ -30,28 +42,6 @@ const ALLOWED_ATTACHMENT_TYPES = new Map([
   ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', ['docx']]
 ]);
 const ALLOWED_RELATED_ITEM_TYPES = new Set(['flight', 'accommodation', 'rentalCar', 'general']);
-
-const uuid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-const ok = (statusCode, body) => ({ statusCode, headers: corsHeaders(), body: body === undefined ? '' : JSON.stringify(body) });
-const noContent = () => ({ statusCode: 204, headers: corsHeaders(), body: '' });
-const fail = (statusCode, code, message, details) => ok(statusCode, { error: { code, message, ...(details ? { details } : {}) } });
-const corsHeaders = () => ({
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-  'Access-Control-Allow-Methods': 'OPTIONS,GET,POST,PUT,DELETE'
-});
-
-function parseBody(event) {
-  if (!event.body) return {};
-  try {
-    return JSON.parse(event.body);
-  } catch (err) {
-    const e = new Error('Request body must be valid JSON');
-    e.statusCode = 400;
-    e.code = 'INVALID_JSON';
-    throw e;
-  }
-}
 
 function getUserId(event) {
   const claims = event.requestContext && event.requestContext.authorizer && event.requestContext.authorizer.claims;
@@ -113,11 +103,11 @@ function requireAdmin(event) {
 async function usernameFromSub(sub) {
   if (!USER_POOL_ID || !sub) return null;
   const safe = String(sub).replace(/"/g, '\\"');
-  const res = await cognito.listUsers({
+  const res = await cognito.send(new ListUsersCommand({
     UserPoolId: USER_POOL_ID,
     Filter: `sub = "${safe}"`,
     Limit: 1
-  }).promise();
+  }));
   if (!res.Users || res.Users.length === 0) return null;
   return res.Users[0].Username;
 }
@@ -126,11 +116,11 @@ async function listAllCognitoUsers(maxTotal = 1000) {
   const out = [];
   let paginationToken;
   do {
-    const res = await cognito.listUsers({
+    const res = await cognito.send(new ListUsersCommand({
       UserPoolId: USER_POOL_ID,
       Limit: 60,
       PaginationToken: paginationToken
-    }).promise();
+    }));
     out.push(...(res.Users || []));
     paginationToken = res.PaginationToken;
   } while (paginationToken && out.length < maxTotal);
@@ -142,12 +132,12 @@ async function listAdminGroupSubs() {
   let nextToken;
   try {
     do {
-      const res = await cognito.listUsersInGroup({
+      const res = await cognito.send(new ListUsersInGroupCommand({
         UserPoolId: USER_POOL_ID,
         GroupName: ADMIN_GROUP_NAME,
         Limit: 60,
         NextToken: nextToken
-      }).promise();
+      }));
       for (const u of res.Users || []) {
         const sub = (u.Attributes.find((a) => a.Name === 'sub') || {}).Value;
         if (sub) subs.add(sub);
@@ -160,33 +150,8 @@ async function listAdminGroupSubs() {
   return subs;
 }
 
-async function queryAllTripsInGsi() {
-  const trips = [];
-  let lastKey;
-  do {
-    const res = await ddb.query({
-      TableName: TABLE_NAME,
-      IndexName: 'GSI1',
-      KeyConditionExpression: 'GSI1PK = :pk',
-      ExpressionAttributeValues: { ':pk': 'TRIP' },
-      ExclusiveStartKey: lastKey
-    }).promise();
-    trips.push(...(res.Items || []));
-    lastKey = res.LastEvaluatedKey;
-  } while (lastKey);
-  return trips;
-}
-
-async function findTripByIdAnyOwner(tripId) {
-  const res = await ddb.query({
-    TableName: TABLE_NAME,
-    IndexName: 'GSI1',
-    KeyConditionExpression: 'GSI1PK = :pk',
-    FilterExpression: 'tripId = :tid',
-    ExpressionAttributeValues: { ':pk': 'TRIP', ':tid': tripId }
-  }).promise();
-  return (res.Items && res.Items[0]) || null;
-}
+// [Review #1][Review #4] queryAllTripsInGsi / findTripByIdAnyOwner moved to
+// ../lib/trips-index (queryAllTrips / findTripById) — sharded + fully paginated.
 
 function normalizeCollaborators(collaborators) {
   if (!Array.isArray(collaborators)) return [];
@@ -195,73 +160,26 @@ function normalizeCollaborators(collaborators) {
 
 async function putAll(items) {
   for (let i = 0; i < items.length; i += 25) {
-    await ddb.batchWrite({
+    await ddb.send(new BatchWriteCommand({
       RequestItems: {
         [TABLE_NAME]: items.slice(i, i + 25).map((Item) => ({ PutRequest: { Item } }))
       }
-    }).promise();
+    }));
   }
 }
 
 async function deleteAll(keys) {
   for (let i = 0; i < keys.length; i += 25) {
-    await ddb.batchWrite({
+    await ddb.send(new BatchWriteCommand({
       RequestItems: {
         [TABLE_NAME]: keys.slice(i, i + 25).map((Key) => ({ DeleteRequest: { Key } }))
       }
-    }).promise();
+    }));
   }
 }
 
-async function getUserTripPointer(userId, tripId) {
-  const res = await ddb.get({
-    TableName: TABLE_NAME,
-    Key: { PK: `USER#${userId}`, SK: `TRIP#${tripId}` }
-  }).promise();
-  return res.Item || null;
-}
-
-async function getTripAccess(userId, tripId) {
-  const res = await ddb.get({
-    TableName: TABLE_NAME,
-    Key: { PK: `TRIP#${tripId}`, SK: `ACCESS#${userId}` }
-  }).promise();
-  return res.Item || null;
-}
-
-// [Feature #28] Resolve trip access: owner, invited collaborator, or link-share viewer
-async function resolveTripForUser(userId, tripId) {
-  // 1. Owner: their own copy is stored directly under USER#userId
-  const pointer = await getUserTripPointer(userId, tripId);
-  if (pointer && pointer.entityType === 'Trip') {
-    return { trip: pointer, access: { role: 'owner', ownerId: userId } };
-  }
-
-  // 2. Invited collaborator: explicit ACCESS record exists
-  const access = await getTripAccess(userId, tripId);
-  const ownerId = (access && access.ownerId) || (pointer && pointer.ownerId);
-  if (ownerId) {
-    const ownerTrip = await getUserTripPointer(ownerId, tripId);
-    if (!ownerTrip || ownerTrip.deleted) return null;
-    return { trip: ownerTrip, access: access || { role: 'viewer', ownerId } };
-  }
-
-  // 3. Link-sharing fallback: any authenticated TripWiz user with the URL gets
-  //    read-only viewer access. Find the trip owner via the TRIP partition's
-  //    access records (the owner record is always there after trip creation).
-  const anyRes = await ddb.query({
-    TableName: TABLE_NAME,
-    KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
-    ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': 'ACCESS#' },
-    Limit: 1
-  }).promise();
-  const anyAccess = anyRes.Items && anyRes.Items[0];
-  if (!anyAccess) return null;
-
-  const ownerTrip = await getUserTripPointer(anyAccess.ownerId, tripId);
-  if (!ownerTrip || ownerTrip.deleted) return null;
-  return { trip: ownerTrip, access: { role: 'viewer', ownerId: anyAccess.ownerId } };
-}
+// [Review #3] getUserTripPointer / getTripAccess / resolveTripForUser moved to
+// ../lib/access and now shared with the WebSocket handler (was duplicated + drifting).
 
 function publicTrip(item) {
   const { PK, SK, GSI1PK, tripStart, ...rest } = item;
@@ -362,10 +280,10 @@ async function requireTripAccess(userId, tripId, edit = false) {
 
 async function getAttachmentForTrip(userId, tripId, fileId, edit = false) {
   await requireTripAccess(userId, tripId, edit);
-  const res = await ddb.get({
+  const res = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { PK: `TRIP#${tripId}`, SK: `ATTACHMENT#${fileId}` }
-  }).promise();
+  }));
   if (!res.Item || res.Item.status !== 'uploaded') {
     const e = new Error('Attachment not found');
     e.statusCode = 404;
@@ -441,11 +359,11 @@ async function lookupUserByEmail(email) {
     throw e;
   }
   const safe = String(email).replace(/"/g, '\\"');
-  const res = await cognito.listUsers({
+  const res = await cognito.send(new ListUsersCommand({
     UserPoolId: USER_POOL_ID,
     Filter: `email = "${safe}"`,
     Limit: 1
-  }).promise();
+  }));
   if (!res.Users || res.Users.length === 0) return null;
   const user = res.Users[0];
   const attrs = user.Attributes || [];
@@ -454,226 +372,15 @@ async function lookupUserByEmail(email) {
   return sub ? { userId: sub, email: (userEmail || email).toLowerCase() } : null;
 }
 
-function formatTripDate(iso) {
-  if (!iso) return null;
-  return new Date(iso).toLocaleDateString('en-US', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
-  });
-}
-
-function buildCollaboratorInviteEmailHtml({ tripTitle, tripId, inviterEmail, role, startDate, endDate }) {
-  const tripUrl = `${FRONTEND_URL}/trips/${tripId}`;
-  const roleLabel = role === 'editor' ? 'Editor' : 'Viewer';
-  const dateLine = startDate
-    ? `<p style="color:#4b5563;margin:0 0 16px;">Dates: <strong>${formatTripDate(startDate)}</strong>${endDate ? ` – <strong>${formatTripDate(endDate)}</strong>` : ''}</p>`
-    : '';
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<body style="margin:0;padding:24px;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;">
-  <div style="max-width:600px;margin:0 auto;">
-    <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);border-radius:14px 14px 0 0;padding:36px 32px;text-align:center;">
-      <p style="color:rgba(255,255,255,0.7);font-size:12px;margin:0 0 6px;letter-spacing:1.5px;text-transform:uppercase;">TripWiz</p>
-      <h1 style="color:#fff;margin:0;font-size:26px;font-weight:700;">You've been invited to a trip</h1>
-    </div>
-    <div style="background:#fff;border-radius:0 0 14px 14px;padding:32px;">
-      <p style="color:#4b5563;margin:0 0 16px;line-height:1.6;">
-        <strong>${inviterEmail}</strong> invited you to collaborate on
-        <strong>${tripTitle}</strong> as an <strong>${roleLabel}</strong>.
-      </p>
-      ${dateLine}
-      <p style="color:#4b5563;margin:0 0 24px;line-height:1.6;">
-        Sign in to TripWiz to view the itinerary, edit stops together in real time, and help plan the trip.
-      </p>
-      <div style="text-align:center;">
-        <a href="${tripUrl}"
-           style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;padding:13px 32px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">
-          Open Trip
-        </a>
-      </div>
-    </div>
-    <p style="text-align:center;color:#9ca3af;font-size:12px;margin-top:16px;">
-      You received this because a TripWiz user shared a trip with your account.
-    </p>
-  </div>
-</body>
-</html>`;
-}
-
-async function sendCollaboratorInviteEmail({ toEmail, tripTitle, tripId, inviterEmail, role, startDate, endDate }) {
-  if (!SOURCE_EMAIL) {
-    console.warn('SOURCE_EMAIL not configured — skipping collaborator invite email');
-    return;
-  }
-
-  const subject = `You're invited to plan "${tripTitle}" on TripWiz`;
-  const html = buildCollaboratorInviteEmailHtml({
-    tripTitle,
-    tripId,
-    inviterEmail,
-    role,
-    startDate,
-    endDate
-  });
-
-  await ses.sendEmail({
-    Source: SOURCE_EMAIL,
-    Destination: { ToAddresses: [toEmail] },
-    Message: {
-      Subject: { Data: subject, Charset: 'UTF-8' },
-      Body: { Html: { Data: html, Charset: 'UTF-8' } }
-    }
-  }).promise();
-}
+// [Review #2] Collaborator-invite email templating/delivery moved to ../lib/email.
 
 async function getSecretJson(secretArn) {
-  const data = await secrets.getSecretValue({ SecretId: secretArn }).promise();
-  const raw = data.SecretString || Buffer.from(data.SecretBinary, 'base64').toString('utf8');
+  const data = await secretsClient.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  const raw = data.SecretString || Buffer.from(data.SecretBinary).toString('utf8');
   return JSON.parse(raw);
 }
 
-function classifyStop(name) {
-  const n = (name || '').toLowerCase();
-  if (/airport|terminal|departure|arrival|airline|airways|fly|flight/.test(n)) return 'airport';
-  if (/train station|bus station|bus terminal|railway|central station|ferry terminal|port terminal|metro station/.test(n)) return 'transit';
-  if (/hotel|hostel|inn|lodge|resort|motel|airbnb|accommodation|check.?in|check.?out|ritz|hilton|marriott|sheraton|hyatt/.test(n)) return 'hotel';
-  return 'attraction';
-}
-
-// [Feature #20] AI route optimization via Amazon Bedrock (Claude Haiku 4.5)
-async function optimizeWithBedrock(itinerary) {
-  const raw = (itinerary || []).filter((s) => s && s.coords && s.coords.lat != null && s.coords.lng != null);
-
-  if (raw.length < 2) {
-    return { stops: [], reasoning: 'Need at least 2 stops with coordinates to optimize a route.' };
-  }
-
-  // Group by day to determine each stop's position within its day
-  const byDay = {};
-  for (const s of raw) {
-    const d = s.dayIndex || 0;
-    if (!byDay[d]) byDay[d] = [];
-    byDay[d].push(s);
-  }
-  for (const day of Object.values(byDay)) {
-    day.sort((a, b) => (a.start || '').localeCompare(b.start || ''));
-    day.forEach((s, i) => { s._dayPos = i; s._dayLen = day.length; });
-  }
-
-  const stops = raw.map((s) => {
-    const type = classifyStop(s.title);
-    const scheduledTime = s.start ? s.start.substring(11, 16) : null;
-    const isFixed = type === 'airport' || type === 'transit';
-    const isFirstInDay = s._dayPos === 0;
-    const isLastInDay = s._dayPos === s._dayLen - 1;
-    return {
-      stopId: s.slotId,
-      name: s.title || 'Unnamed stop',
-      type,
-      isFixed,
-      ...(scheduledTime ? { scheduledTime } : {}),
-      ...(type === 'hotel' ? { isFirstInDay, isLastInDay } : {}),
-      dayIndex: s.dayIndex || 0,
-      lat: s.coords.lat,
-      lng: s.coords.lng,
-      durationHours: s.duration || s.notes || '2'
-    };
-  });
-
-  const systemPrompt = `You are TripWiz, an expert travel planner with deep knowledge of geography, logistics, and creating memorable travel experiences. When given a list of trip stops you reorder them day-by-day into the most logical, efficient, and enjoyable itinerary possible. You reason carefully about geography, travel time, meal timing, attraction types, and practical constraints.
-
-CRITICAL CONSTRAINT — AIRPORTS, FLIGHTS & TERMINALS (ABSOLUTELY NON-NEGOTIABLE):
-Any stop with type "airport" or "transit", OR whose name contains words like "airport", "terminal", "flight", "departure", or "arrival", is a FIXED TIME ANCHOR. You MUST:
-- Keep it on its EXACT dayIndex — never reassign it to a different day
-- Output its scheduledTime UNCHANGED in your JSON — do not alter it by even one minute
-- Never reorder it relative to other fixed stops on the same day
-These are real-world flights with real consequences. There are ZERO exceptions to this rule.`;
-
-  const userPrompt = `Analyze the following trip itinerary and produce a detailed optimized schedule.
-
-Stops:
-${JSON.stringify(stops, null, 2)}
-
-Rules:
-1. NEVER change dayIndex or scheduledTime for any stop where isFixed=true. Output their times exactly as given.
-2. Hotels obey isFirstInDay / isLastInDay — a check-out hotel must remain first in its day; a check-in hotel must remain last.
-3. Reorder attraction stops within each day to minimize travel distance (use lat/lng) and create a pleasant, logical flow: breakfast cafes early morning, museums and landmarks mid-morning, parks and outdoor sights in the afternoon, restaurants at meal times.
-4. Assign startTime for every stop in "HH:MM" 24-hour format. First attraction no earlier than 09:00; last stop should finish by 22:00. Allow 15 min travel buffer between stops plus each stop's durationHours (use the lower bound of any range).
-5. Never move a stop to a different day. Never add or remove any stop.
-6. Use exactly the stopIds provided.
-
-Respond with ONLY a valid JSON object — absolutely no markdown fences, no prose outside the JSON:
-{
-  "stops": [
-    {"stopId": "<id>", "dayIndex": <int>, "startTime": "HH:MM"}
-  ],
-  "reasoning": "Write 3-5 detailed paragraphs explaining your overall strategy: the geographic logic you used, how you handled any fixed anchors, why certain stops are grouped together, and the general experience you are trying to create for the traveler.",
-  "dailySummary": [
-    {
-      "dayIndex": <int>,
-      "heading": "Day N — <evocative theme or neighborhood name>",
-      "description": "Write 3-5 sentences describing this specific day in detail: what the traveler will experience in sequence, why this order makes geographic and experiential sense, any notable transitions between areas, how travel time was managed, and what makes this day's flow enjoyable."
-    }
-  ]
-}`;
-
-  const res = await bedrock.invokeModel({
-    modelId: BEDROCK_MODEL_ID,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body: JSON.stringify({
-      anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }]
-    })
-  }).promise();
-
-  const body = JSON.parse(res.body.toString('utf8'));
-  const text = (body.content && body.content[0] && body.content[0].text) || '';
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    const e = new Error('Bedrock did not return parseable JSON');
-    e.statusCode = 502;
-    e.code = 'BEDROCK_PARSE_ERROR';
-    throw e;
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(jsonMatch[0]);
-  } catch (err) {
-    const e = new Error('Bedrock returned invalid JSON');
-    e.statusCode = 502;
-    e.code = 'BEDROCK_PARSE_ERROR';
-    throw e;
-  }
-
-  const validIds = new Set(stops.map((s) => s.stopId));
-  const cleanedStops = (parsed.stops || [])
-    .filter((p) => p && validIds.has(p.stopId))
-    .map((p) => ({
-      stopId: p.stopId,
-      dayIndex: Number.isInteger(p.dayIndex) ? p.dayIndex : 0,
-      startTime: typeof p.startTime === 'string' && /^\d{2}:\d{2}$/.test(p.startTime) ? p.startTime : ''
-    }));
-
-  const dailySummary = Array.isArray(parsed.dailySummary)
-    ? parsed.dailySummary
-        .filter((d) => d && Number.isInteger(d.dayIndex) && typeof d.description === 'string')
-        .map((d) => ({
-          dayIndex: d.dayIndex,
-          heading: typeof d.heading === 'string' ? d.heading : `Day ${d.dayIndex + 1}`,
-          description: d.description
-        }))
-    : [];
-
-  return {
-    stops: cleanedStops,
-    reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : '',
-    dailySummary,
-    model: BEDROCK_MODEL_ID
-  };
-}
+// [Review #2] classifyStop + optimizeWithBedrock moved to ../lib/optimize.
 
 async function searchPlaces(query, biasLng, biasLat) {
   if (!query || query.length < 2) {
@@ -693,7 +400,7 @@ async function searchPlaces(query, biasLng, biasLat) {
     params.BiasPosition = [parseFloat(biasLng), parseFloat(biasLat)];
   }
 
-  const result = await location.searchPlaceIndexForText(params).promise();
+  const result = await location.send(new SearchPlaceIndexForTextCommand(params));
 
   return (result.Results || []).map((r) => {
     const p = r.Place;
@@ -751,7 +458,7 @@ async function calculateRoute(body) {
     };
     if (waypoints.length > 0) params.WaypointPositions = waypoints.map((w) => w.Position);
 
-    const result = await location.calculateRoute(params).promise();
+    const result = await location.send(new CalculateRouteCommand(params));
 
     // Flatten all leg geometries into a single ordered position list [lat, lng]
     const positions = [];
@@ -771,14 +478,14 @@ async function calculateRoute(body) {
 // [Feature #29] After a REST save, broadcast the new trip to all connected collaborators
 async function broadcastTripUpdate(tripId, trip, editorUserId) {
   if (!WS_ENDPOINT) return;
-  const connections = await ddb.query({
+  const connections = await ddb.send(new QueryCommand({
     TableName: TABLE_NAME,
     KeyConditionExpression: 'PK = :pk',
     ExpressionAttributeValues: { ':pk': `CONN#TRIP#${tripId}` }
-  }).promise();
+  }));
   if (!connections.Items || connections.Items.length === 0) return;
 
-  const apigw = new AWS.ApiGatewayManagementApi({ endpoint: WS_ENDPOINT });
+  const apigw = new ApiGatewayManagementApiClient({ endpoint: WS_ENDPOINT });
   const message = JSON.stringify({
     action: 'edit',
     tripId,
@@ -788,13 +495,13 @@ async function broadcastTripUpdate(tripId, trip, editorUserId) {
 
   await Promise.all(connections.Items.map(async (conn) => {
     try {
-      await apigw.postToConnection({ ConnectionId: conn.connectionId, Data: message }).promise();
+      await apigw.send(new PostToConnectionCommand({ ConnectionId: conn.connectionId, Data: message }));
     } catch (err) {
-      if (err.statusCode === 410) {
-        await ddb.delete({
+      if (err.statusCode === 410 || err.$metadata?.httpStatusCode === 410) {
+        await ddb.send(new DeleteCommand({
           TableName: TABLE_NAME,
           Key: { PK: `CONN#TRIP#${tripId}`, SK: `CONN#${conn.connectionId}` }
-        }).promise();
+        }));
       }
     }
   }));
@@ -814,7 +521,7 @@ exports.handler = async (event) => {
   try {
     // [Feature #10] List the signed-in user's (non-deleted) trips
     if (method === 'GET' && path === '/trips') {
-      const res = await ddb.query({
+      const res = await ddb.send(new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skprefix)',
         FilterExpression: 'attribute_not_exists(deleted) OR deleted = :notDeleted',
@@ -823,7 +530,7 @@ exports.handler = async (event) => {
           ':skprefix': 'TRIP#',
           ':notDeleted': false
         }
-      }).promise();
+      }));
       return ok(200, { items: (res.Items || []).map(publicTrip), lastKey: res.LastEvaluatedKey });
     }
 
@@ -845,18 +552,22 @@ exports.handler = async (event) => {
         collaborators,
         itinerary: Array.isArray(body.itinerary) ? body.itinerary : [],
         metadata: body.metadata || {},
+        // [Review #7] Link sharing is opt-in per trip (default off); see lib/access.js
+        shareEnabled: body.shareEnabled === true,
         version: 1,
-        GSI1PK: 'TRIP',
+        // [Review #1] Write-shard the GSI partition so the platform-wide "all trips"
+        // access pattern no longer concentrates on a single hot partition.
+        GSI1PK: tripGsiPk(tripId),
         tripStart: body.startDate || now,
         createdAt: now,
         updatedAt: now
       };
 
-      await ddb.put({
+      await ddb.send(new PutCommand({
         TableName: TABLE_NAME,
         Item: trip,
         ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)'
-      }).promise();
+      }));
       await writeAccessRecords(trip, collaborators);
       return ok(201, { tripId, trip: publicTrip(trip) });
     }
@@ -875,7 +586,7 @@ exports.handler = async (event) => {
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
       await requireTripAccess(userId, tripId, false);
-      const res = await ddb.query({
+      const res = await ddb.send(new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
         FilterExpression: '#status = :uploaded',
@@ -885,7 +596,7 @@ exports.handler = async (event) => {
           ':skp': 'ATTACHMENT#',
           ':uploaded': 'uploaded'
         }
-      }).promise();
+      }));
       const items = (res.Items || [])
         .map(publicAttachment)
         .sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')));
@@ -901,12 +612,11 @@ exports.handler = async (event) => {
       const input = validateAttachmentInput(parseBody(event));
       const fileId = `f-${uuid()}`;
       const s3Key = `trip-documents/${resolved.trip.ownerId}/${tripId}/${fileId}/${input.fileName}`;
-      const uploadUrl = await s3.getSignedUrlPromise('putObject', {
+      const uploadUrl = await getSignedUrl(s3, new PutObjectCommand({
         Bucket: DOCUMENTS_BUCKET,
         Key: s3Key,
         ContentType: input.fileType,
-        Expires: 300,
-      });
+      }), { expiresIn: 300 });
       return ok(200, { fileId, s3Key, uploadUrl, expiresIn: 300 });
     }
 
@@ -925,7 +635,7 @@ exports.handler = async (event) => {
 
       let head;
       try {
-        head = await s3.headObject({ Bucket: DOCUMENTS_BUCKET, Key: s3Key }).promise();
+        head = await s3.send(new HeadObjectCommand({ Bucket: DOCUMENTS_BUCKET, Key: s3Key }));
       } catch (err) {
         return fail(400, 'UPLOAD_NOT_FOUND', 'Uploaded file was not found in storage');
       }
@@ -951,11 +661,11 @@ exports.handler = async (event) => {
         relatedItemId: input.relatedItemId,
         status: 'uploaded'
       };
-      await ddb.put({
+      await ddb.send(new PutCommand({
         TableName: TABLE_NAME,
         Item: item,
         ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)'
-      }).promise();
+      }));
       return ok(201, { attachment: publicAttachment(item) });
     }
 
@@ -966,12 +676,11 @@ exports.handler = async (event) => {
       if (!tripId || !fileId) return fail(400, 'BAD_REQUEST', 'tripId and fileId are required');
       if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
       const attachment = await getAttachmentForTrip(userId, tripId, fileId, false);
-      const downloadUrl = await s3.getSignedUrlPromise('getObject', {
+      const downloadUrl = await getSignedUrl(s3, new GetObjectCommand({
         Bucket: DOCUMENTS_BUCKET,
         Key: attachment.s3Key,
-        Expires: 300,
         ResponseContentDisposition: `inline; filename="${safeFileName(attachment.fileName)}"`
-      });
+      }), { expiresIn: 300 });
       return ok(200, { downloadUrl, expiresIn: 300 });
     }
 
@@ -983,14 +692,14 @@ exports.handler = async (event) => {
       if (!DOCUMENTS_BUCKET) return fail(500, 'CONFIGURATION_ERROR', 'DOCUMENTS_BUCKET is not configured');
       const attachment = await getAttachmentForTrip(userId, tripId, fileId, true);
       try {
-        await s3.deleteObject({ Bucket: DOCUMENTS_BUCKET, Key: attachment.s3Key }).promise();
+        await s3.send(new DeleteObjectCommand({ Bucket: DOCUMENTS_BUCKET, Key: attachment.s3Key }));
       } catch (err) {
-        if (err.code !== 'NoSuchKey' && err.code !== 'NotFound') throw err;
+        if (err.name !== 'NoSuchKey' && err.name !== 'NotFound') throw err;
       }
-      await ddb.delete({
+      await ddb.send(new DeleteCommand({
         TableName: TABLE_NAME,
         Key: { PK: `TRIP#${tripId}`, SK: `ATTACHMENT#${fileId}` }
-      }).promise();
+      }));
       return noContent();
     }
 
@@ -1007,7 +716,7 @@ exports.handler = async (event) => {
       const expectedVersion = Number(body.version);
       if (!expectedVersion) return fail(400, 'VERSION_REQUIRED', 'version is required for updates');
 
-      const allowed = ['title', 'startDate', 'endDate', 'collaborators', 'itinerary', 'metadata'];
+      const allowed = ['title', 'startDate', 'endDate', 'collaborators', 'itinerary', 'metadata', 'shareEnabled'];
       const names = { '#version': 'version', '#updatedAt': 'updatedAt' };
       const values = { ':expectedVersion': expectedVersion, ':newVersion': expectedVersion + 1, ':updatedAt': new Date().toISOString() };
       const sets = ['#version = :newVersion', '#updatedAt = :updatedAt'];
@@ -1031,7 +740,7 @@ exports.handler = async (event) => {
       if (sets.length === 2) return fail(400, 'BAD_REQUEST', 'No supported fields provided');
 
       try {
-        const updateRes = await ddb.update({
+        const updateRes = await ddb.send(new UpdateCommand({
           TableName: TABLE_NAME,
           Key: { PK: `USER#${resolved.trip.ownerId}`, SK: `TRIP#${tripId}` },
           UpdateExpression: `SET ${sets.join(', ')}`,
@@ -1039,7 +748,7 @@ exports.handler = async (event) => {
           ExpressionAttributeValues: values,
           ConditionExpression: 'attribute_exists(SK) AND #version = :expectedVersion',
           ReturnValues: 'ALL_NEW'
-        }).promise();
+        }));
 
         if (['title', 'startDate', 'endDate', 'collaborators'].some((field) => body[field] !== undefined)) {
           await syncAccessRecords(resolved.trip, updateRes.Attributes);
@@ -1052,7 +761,7 @@ exports.handler = async (event) => {
 
         return ok(200, { trip: publicTrip(updateRes.Attributes) });
       } catch (err) {
-        if (err.code === 'ConditionalCheckFailedException') {
+        if (err.name === 'ConditionalCheckFailedException') {
           return fail(409, 'VERSION_CONFLICT', 'Trip was updated by someone else');
         }
         throw err;
@@ -1067,13 +776,13 @@ exports.handler = async (event) => {
       if (!resolved) return fail(404, 'NOT_FOUND', 'Trip not found');
       if (resolved.trip.ownerId !== userId) return fail(403, 'FORBIDDEN', 'Only the owner can delete this trip');
 
-      await ddb.update({
+      await ddb.send(new UpdateCommand({
         TableName: TABLE_NAME,
         Key: { PK: `USER#${userId}`, SK: `TRIP#${tripId}` },
         UpdateExpression: 'SET deleted = :deleted, updatedAt = :updatedAt',
         ExpressionAttributeValues: { ':deleted': true, ':updatedAt': new Date().toISOString() },
         ConditionExpression: 'attribute_exists(SK)'
-      }).promise();
+      }));
       return noContent();
     }
 
@@ -1085,15 +794,15 @@ exports.handler = async (event) => {
       if (!resolved) return fail(404, 'NOT_FOUND', 'Trip not found');
 
       const [alertsRes, metaRes] = await Promise.all([
-        ddb.query({
+        ddb.send(new QueryCommand({
           TableName: TABLE_NAME,
           KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
           ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': 'ALERT#' }
-        }).promise(),
-        ddb.get({
+        })),
+        ddb.send(new GetCommand({
           TableName: TABLE_NAME,
           Key: { PK: `TRIP#${tripId}`, SK: 'META#VALIDATION' }
-        }).promise()
+        }))
       ]);
 
       const alerts = (alertsRes.Items || []).map((item) => {
@@ -1115,11 +824,11 @@ exports.handler = async (event) => {
       const resolved = await resolveTripForUser(userId, tripId);
       if (!resolved) return fail(404, 'NOT_FOUND', 'Trip not found');
 
-      const res = await ddb.query({
+      const res = await ddb.send(new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
         ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': 'FALLBACKS#' }
-      }).promise();
+      }));
 
       const fallbacks = (res.Items || []).map((item) => ({
         slotId: item.slotId,
@@ -1137,21 +846,21 @@ exports.handler = async (event) => {
       const resolved = await resolveTripForUser(userId, tripId);
       if (!resolved) return fail(404, 'NOT_FOUND', 'Trip not found');
 
-      const res = await ddb.query({
+      const res = await ddb.send(new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
         ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': 'WEATHER#' }
-      }).promise();
+      }));
 
       const weather = (res.Items || []).map((item) => {
         const { PK, SK, ttl, entityType, ...rest } = item;
         return rest;
       });
 
-      const meta = await ddb.get({
+      const meta = await ddb.send(new GetCommand({
         TableName: TABLE_NAME,
         Key: { PK: `TRIP#${tripId}`, SK: 'META#VALIDATION' }
-      }).promise();
+      }));
 
       return ok(200, {
         weather,
@@ -1171,11 +880,11 @@ exports.handler = async (event) => {
       const itinerary = resolved.trip.itinerary || [];
       const slotsToCheck = itinerary.filter((s) => s.start && s.coords && s.coords.lat != null).length;
 
-      await lambda.invoke({
+      await lambdaClient.send(new InvokeCommand({
         FunctionName: VALIDATE_FUNCTION_NAME,
         InvocationType: 'Event',
         Payload: JSON.stringify({ source: 'tripwiz.rest', detail: { tripId, userId } })
-      }).promise();
+      }));
       return ok(202, { jobId: `validate-${tripId}-${Date.now()}`, slotsToCheck, totalSlots: itinerary.length });
     }
 
@@ -1213,7 +922,7 @@ exports.handler = async (event) => {
       const nextCollaborators = [...collaborators, invited.userId];
 
       try {
-        await ddb.update({
+        await ddb.send(new UpdateCommand({
           TableName: TABLE_NAME,
           Key: { PK: `USER#${trip.ownerId}`, SK: `TRIP#${tripId}` },
           UpdateExpression: 'SET collaborators = :c, #v = :nv, updatedAt = :u',
@@ -1225,9 +934,9 @@ exports.handler = async (event) => {
             ':ev': expectedVersion
           },
           ConditionExpression: '#v = :ev'
-        }).promise();
+        }));
       } catch (err) {
-        if (err.code === 'ConditionalCheckFailedException') {
+        if (err.name === 'ConditionalCheckFailedException') {
           return fail(409, 'VERSION_CONFLICT', 'Trip was updated concurrently — please retry');
         }
         throw err;
@@ -1268,6 +977,11 @@ exports.handler = async (event) => {
         }
       ]);
 
+      // The collaborator is already granted access above; the email is a best-effort
+      // notification. Surface its outcome so the UI can warn when delivery fails (e.g.
+      // while SES is in sandbox mode and the recipient address is not verified).
+      let emailSent = false;
+      let emailError = null;
       try {
         await sendCollaboratorInviteEmail({
           toEmail: invited.email,
@@ -1278,12 +992,16 @@ exports.handler = async (event) => {
           startDate: trip.startDate,
           endDate: trip.endDate
         });
+        emailSent = true;
       } catch (err) {
+        emailError = err.message;
         console.warn(`Collaborator invite email failed for trip=${tripId} to=${invited.email}:`, err.message);
       }
 
       return ok(200, {
-        collaborator: { userId: invited.userId, email: invited.email, role: 'editor', addedAt: now }
+        collaborator: { userId: invited.userId, email: invited.email, role: 'editor', addedAt: now },
+        emailSent,
+        ...(emailError ? { emailError } : {})
       });
     }
 
@@ -1294,11 +1012,11 @@ exports.handler = async (event) => {
       const resolved = await resolveTripForUser(userId, tripId);
       if (!resolved) return fail(404, 'NOT_FOUND', 'Trip not found');
 
-      const res = await ddb.query({
+      const res = await ddb.send(new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
         ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': 'COLLAB#' }
-      }).promise();
+      }));
 
       const collaborators = (res.Items || []).map((item) => ({
         userId: item.userId,
@@ -1341,7 +1059,7 @@ exports.handler = async (event) => {
       const now = new Date().toISOString();
 
       try {
-        await ddb.update({
+        await ddb.send(new UpdateCommand({
           TableName: TABLE_NAME,
           Key: { PK: `USER#${trip.ownerId}`, SK: `TRIP#${tripId}` },
           UpdateExpression: 'SET collaborators = :c, #v = :nv, updatedAt = :u',
@@ -1353,9 +1071,9 @@ exports.handler = async (event) => {
             ':ev': expectedVersion
           },
           ConditionExpression: '#v = :ev'
-        }).promise();
+        }));
       } catch (err) {
-        if (err.code === 'ConditionalCheckFailedException') {
+        if (err.name === 'ConditionalCheckFailedException') {
           return fail(409, 'VERSION_CONFLICT', 'Trip was updated concurrently — please retry');
         }
         throw err;
@@ -1408,10 +1126,10 @@ exports.handler = async (event) => {
 
     // [Feature #14] Read trending destinations for the user dashboard (built-in fallback)
     if (method === 'GET' && path === '/trending') {
-      const res = await ddb.get({
+      const res = await ddb.send(new GetCommand({
         TableName: TABLE_NAME,
         Key: { PK: 'SETTINGS', SK: 'TRENDING' }
-      }).promise();
+      }));
       const destinations = (res.Item && Array.isArray(res.Item.destinations) && res.Item.destinations.length > 0)
         ? res.Item.destinations
         : DEFAULT_TRENDING;
@@ -1429,7 +1147,7 @@ exports.handler = async (event) => {
         tag:     String(d.tag || '').slice(0, 80),
         emoji:   String(d.emoji || '').slice(0, 8),
       }));
-      await ddb.put({
+      await ddb.send(new PutCommand({
         TableName: TABLE_NAME,
         Item: {
           PK: 'SETTINGS',
@@ -1439,7 +1157,7 @@ exports.handler = async (event) => {
           updatedAt: new Date().toISOString(),
           updatedBy: getUserId(event) || 'unknown'
         }
-      }).promise();
+      }));
       return ok(200, { destinations: clean });
     }
 
@@ -1450,7 +1168,7 @@ exports.handler = async (event) => {
       requireAdmin(event);
 
       const users = await listAllCognitoUsers();
-      const trips = (await queryAllTripsInGsi()).filter((t) => !t.deleted);
+      const trips = (await queryAllTrips(ddb, TABLE_NAME)).filter((t) => !t.deleted);
 
       const nowIso = new Date().toISOString();
       const today = nowIso.slice(0, 10);
@@ -1500,7 +1218,7 @@ exports.handler = async (event) => {
 
       const [users, trips, adminSubs] = await Promise.all([
         listAllCognitoUsers(),
-        queryAllTripsInGsi(),
+        queryAllTrips(ddb, TABLE_NAME),
         listAdminGroupSubs(),
       ]);
 
@@ -1534,7 +1252,7 @@ exports.handler = async (event) => {
       const targetSub = event.pathParameters && event.pathParameters.userId;
       const username = await usernameFromSub(targetSub);
       if (!username) return fail(404, 'NOT_FOUND', 'User not found');
-      await cognito.adminDisableUser({ UserPoolId: USER_POOL_ID, Username: username }).promise();
+      await cognito.send(new AdminDisableUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
       return ok(200, { userId: targetSub, enabled: false });
     }
 
@@ -1544,7 +1262,7 @@ exports.handler = async (event) => {
       const targetSub = event.pathParameters && event.pathParameters.userId;
       const username = await usernameFromSub(targetSub);
       if (!username) return fail(404, 'NOT_FOUND', 'User not found');
-      await cognito.adminEnableUser({ UserPoolId: USER_POOL_ID, Username: username }).promise();
+      await cognito.send(new AdminEnableUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
       return ok(200, { userId: targetSub, enabled: true });
     }
 
@@ -1554,11 +1272,11 @@ exports.handler = async (event) => {
       const targetSub = event.pathParameters && event.pathParameters.userId;
       const username = await usernameFromSub(targetSub);
       if (!username) return fail(404, 'NOT_FOUND', 'User not found');
-      await cognito.adminAddUserToGroup({
+      await cognito.send(new AdminAddUserToGroupCommand({
         UserPoolId: USER_POOL_ID,
         Username: username,
         GroupName: ADMIN_GROUP_NAME
-      }).promise();
+      }));
       return ok(200, { userId: targetSub, isAdmin: true });
     }
 
@@ -1572,11 +1290,11 @@ exports.handler = async (event) => {
       }
       const username = await usernameFromSub(targetSub);
       if (!username) return fail(404, 'NOT_FOUND', 'User not found');
-      await cognito.adminRemoveUserFromGroup({
+      await cognito.send(new AdminRemoveUserFromGroupCommand({
         UserPoolId: USER_POOL_ID,
         Username: username,
         GroupName: ADMIN_GROUP_NAME
-      }).promise();
+      }));
       return ok(200, { userId: targetSub, isAdmin: false });
     }
 
@@ -1590,13 +1308,13 @@ exports.handler = async (event) => {
       let lastKey;
       const keys = [];
       do {
-        const res = await ddb.query({
+        const res = await ddb.send(new QueryCommand({
           TableName: TABLE_NAME,
           KeyConditionExpression: 'PK = :pk',
           ExpressionAttributeValues: { ':pk': `USER#${targetSub}` },
           ProjectionExpression: 'PK, SK',
           ExclusiveStartKey: lastKey
-        }).promise();
+        }));
         (res.Items || []).forEach((it) => keys.push({ PK: it.PK, SK: it.SK }));
         lastKey = res.LastEvaluatedKey;
       } while (lastKey);
@@ -1604,7 +1322,7 @@ exports.handler = async (event) => {
 
       if (username) {
         try {
-          await cognito.adminDeleteUser({ UserPoolId: USER_POOL_ID, Username: username }).promise();
+          await cognito.send(new AdminDeleteUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
         } catch (e) {
           console.warn('adminDeleteUser failed', e.message);
         }
@@ -1620,7 +1338,7 @@ exports.handler = async (event) => {
       const q = ((event.queryStringParameters || {}).q || '').toLowerCase().trim();
 
       const [tripsRaw, users] = await Promise.all([
-        queryAllTripsInGsi(),
+        queryAllTrips(ddb, TABLE_NAME),
         listAllCognitoUsers(),
       ]);
 
@@ -1662,14 +1380,14 @@ exports.handler = async (event) => {
       requireAdmin(event);
       const tripId = event.pathParameters && event.pathParameters.tripId;
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
-      const trip = await findTripByIdAnyOwner(tripId);
+      const trip = await findTripById(ddb, TABLE_NAME, tripId);
       if (!trip) return fail(404, 'NOT_FOUND', 'Trip not found');
-      await ddb.update({
+      await ddb.send(new UpdateCommand({
         TableName: TABLE_NAME,
         Key: { PK: trip.PK, SK: trip.SK },
         UpdateExpression: 'SET deleted = :d, updatedAt = :u',
         ExpressionAttributeValues: { ':d': true, ':u': new Date().toISOString() }
-      }).promise();
+      }));
       return noContent();
     }
 
@@ -1680,23 +1398,23 @@ exports.handler = async (event) => {
       if (!tripId) return fail(400, 'BAD_REQUEST', 'tripId is required');
       const body = parseBody(event);
       const hidden = body.hidden !== false;
-      const trip = await findTripByIdAnyOwner(tripId);
+      const trip = await findTripById(ddb, TABLE_NAME, tripId);
       if (!trip) return fail(404, 'NOT_FOUND', 'Trip not found');
-      await ddb.update({
+      await ddb.send(new UpdateCommand({
         TableName: TABLE_NAME,
         Key: { PK: trip.PK, SK: trip.SK },
         UpdateExpression: 'SET hidden = :h, updatedAt = :u',
         ExpressionAttributeValues: { ':h': hidden, ':u': new Date().toISOString() }
-      }).promise();
+      }));
       return ok(200, { tripId, hidden });
     }
 
     // [Feature #6][Feature #7] Read the user's saved preferences
     if (method === 'GET' && path === '/user/prefs') {
-      const res = await ddb.get({
+      const res = await ddb.send(new GetCommand({
         TableName: TABLE_NAME,
         Key: { PK: `USER#${userId}`, SK: 'PREFS' },
-      }).promise();
+      }));
       return ok(200, res.Item || {});
     }
 
@@ -1719,7 +1437,7 @@ exports.handler = async (event) => {
         notifyMarketing: body.notifyMarketing === true,
         updatedAt:       now,
       };
-      await ddb.put({ TableName: TABLE_NAME, Item: item }).promise();
+      await ddb.send(new PutCommand({ TableName: TABLE_NAME, Item: item }));
       return ok(200, item);
     }
 

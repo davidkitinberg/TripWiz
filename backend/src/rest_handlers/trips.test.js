@@ -1,33 +1,112 @@
-function promiseResult(value) {
-  return { promise: jest.fn().mockResolvedValue(value) };
-}
-
-function promiseReject(error) {
-  return { promise: jest.fn().mockRejectedValue(error) };
-}
-
-function loadHandler({ ddb, lambda, secrets, s3, fetchImpl }) {
+function loadHandler({ ddb = {}, s3Send, s3Presigner } = {}) {
   jest.resetModules();
-  jest.doMock('aws-sdk', () => ({
-    DynamoDB: { DocumentClient: jest.fn(() => ddb) },
-    Lambda: jest.fn(() => lambda || { invoke: jest.fn(() => promiseResult({})) }),
-    SecretsManager: jest.fn(() => secrets || { getSecretValue: jest.fn(() => promiseResult({ SecretString: '{}' })) }),
-    CognitoIdentityServiceProvider: jest.fn(() => ({ listUsers: jest.fn(() => promiseResult({ Users: [] })) })),
-    BedrockRuntime: jest.fn(() => ({ invokeModel: jest.fn(() => promiseResult({ body: Buffer.from('{}') })) })),
-    Location: jest.fn(() => ({ searchPlaceIndexForText: jest.fn(() => promiseResult({ Results: [] })), calculateRoute: jest.fn(() => promiseResult({})) })),
-    S3: jest.fn(() => s3 || {
-      getSignedUrlPromise: jest.fn(() => Promise.resolve('https://signed.example/upload')),
-      headObject: jest.fn(() => promiseResult({ ContentLength: 1 })),
-      deleteObject: jest.fn(() => promiseResult({}))
+
+  const ops = {
+    get:        ddb.get        || jest.fn().mockResolvedValue({}),
+    put:        ddb.put        || jest.fn().mockResolvedValue({}),
+    update:     ddb.update     || jest.fn().mockResolvedValue({}),
+    delete:     ddb.delete     || jest.fn().mockResolvedValue({}),
+    query:      ddb.query      || jest.fn().mockResolvedValue({ Items: [] }),
+    batchWrite: ddb.batchWrite || jest.fn().mockResolvedValue({}),
+  };
+
+  const mockDdb = {
+    ...ops,
+    send: jest.fn((cmd) => {
+      const t = cmd.constructor.name;
+      if (t === 'GetCommand')        return ops.get(cmd.input);
+      if (t === 'PutCommand')        return ops.put(cmd.input);
+      if (t === 'UpdateCommand')     return ops.update(cmd.input);
+      if (t === 'DeleteCommand')     return ops.delete(cmd.input);
+      if (t === 'QueryCommand')      return ops.query(cmd.input);
+      if (t === 'BatchWriteCommand') return ops.batchWrite(cmd.input);
     }),
-    SES: jest.fn(() => ({ sendEmail: jest.fn(() => promiseResult({})) }))
+  };
+
+  const mockS3Send = s3Send || jest.fn().mockImplementation((cmd) => {
+    const t = cmd.constructor.name;
+    if (t === 'HeadObjectCommand') return Promise.resolve({ ContentLength: 1 });
+    return Promise.resolve({});
+  });
+
+  const mockGetSignedUrl = s3Presigner || jest.fn().mockResolvedValue('https://signed.example/upload');
+
+  jest.doMock('@aws-sdk/client-dynamodb', () => ({
+    DynamoDBClient: jest.fn(() => ({})),
   }));
-  jest.doMock('node-fetch', () => fetchImpl || jest.fn());
+
+  jest.doMock('@aws-sdk/lib-dynamodb', () => ({
+    DynamoDBDocumentClient: { from: jest.fn(() => mockDdb) },
+    GetCommand:        class GetCommand        { constructor(i) { this.input = i; } },
+    PutCommand:        class PutCommand        { constructor(i) { this.input = i; } },
+    UpdateCommand:     class UpdateCommand     { constructor(i) { this.input = i; } },
+    DeleteCommand:     class DeleteCommand     { constructor(i) { this.input = i; } },
+    QueryCommand:      class QueryCommand      { constructor(i) { this.input = i; } },
+    BatchWriteCommand: class BatchWriteCommand { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-lambda', () => ({
+    LambdaClient:   jest.fn(() => ({ send: jest.fn().mockResolvedValue({}) })),
+    InvokeCommand:  class InvokeCommand { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-secrets-manager', () => ({
+    SecretsManagerClient:  jest.fn(() => ({ send: jest.fn().mockResolvedValue({ SecretString: '{}' }) })),
+    GetSecretValueCommand: class GetSecretValueCommand { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-cognito-identity-provider', () => ({
+    CognitoIdentityProviderClient:   jest.fn(() => ({ send: jest.fn().mockResolvedValue({ Users: [] }) })),
+    ListUsersCommand:                class { constructor(i) { this.input = i; } },
+    ListUsersInGroupCommand:         class { constructor(i) { this.input = i; } },
+    AdminDisableUserCommand:         class { constructor(i) { this.input = i; } },
+    AdminEnableUserCommand:          class { constructor(i) { this.input = i; } },
+    AdminAddUserToGroupCommand:      class { constructor(i) { this.input = i; } },
+    AdminRemoveUserFromGroupCommand: class { constructor(i) { this.input = i; } },
+    AdminDeleteUserCommand:          class { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-location', () => ({
+    LocationClient:                jest.fn(() => ({ send: jest.fn().mockResolvedValue({ Results: [] }) })),
+    SearchPlaceIndexForTextCommand: class { constructor(i) { this.input = i; } },
+    CalculateRouteCommand:         class { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-s3', () => ({
+    S3Client:           jest.fn(() => ({ send: mockS3Send })),
+    PutObjectCommand:   class { constructor(i) { this.input = i; } },
+    GetObjectCommand:   class { constructor(i) { this.input = i; } },
+    HeadObjectCommand:  class { constructor(i) { this.input = i; } },
+    DeleteObjectCommand: class { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/s3-request-presigner', () => ({
+    getSignedUrl: mockGetSignedUrl,
+  }));
+
+  jest.doMock('@aws-sdk/client-apigatewaymanagementapi', () => ({
+    ApiGatewayManagementApiClient: jest.fn(() => ({ send: jest.fn().mockResolvedValue({}) })),
+    PostToConnectionCommand: class { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-ses', () => ({
+    SESClient:        jest.fn(() => ({ send: jest.fn().mockResolvedValue({}) })),
+    SendEmailCommand: class { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-bedrock-runtime', () => ({
+    BedrockRuntimeClient: jest.fn(() => ({ send: jest.fn().mockResolvedValue({ body: Buffer.from('{"itinerary":[]}') }) })),
+    InvokeModelCommand:   class { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('node-fetch', () => jest.fn());
+
   process.env.TABLE_NAME = 'TripWizTable';
   process.env.VALIDATE_FUNCTION_NAME = 'TripWiz-Validate';
   process.env.MAPPING_SECRET_ARN = 'mapping-secret';
   process.env.DOCUMENTS_BUCKET = 'tripwiz-documents';
-  return require('./trips').handler;
+
+  return { handler: require('./trips').handler, ddb: ops, getSignedUrl: mockGetSignedUrl, s3Send: mockS3Send };
 }
 
 function event({ method, resource, userId, tripId, fileId, body }) {
@@ -37,14 +116,14 @@ function event({ method, resource, userId, tripId, fileId, body }) {
     pathParameters: tripId ? { tripId, ...(fileId ? { fileId } : {}) } : undefined,
     body: body === undefined ? undefined : JSON.stringify(body),
     requestContext: {
-      authorizer: userId ? { claims: { sub: userId } } : undefined
-    }
+      authorizer: userId ? { claims: { sub: userId } } : undefined,
+    },
   };
 }
 
 describe('rest trip handler', () => {
   test('missing Cognito claims returns 401', async () => {
-    const handler = loadHandler({ ddb: {} });
+    const { handler } = loadHandler({ ddb: {} });
 
     const res = await handler(event({ method: 'GET', resource: '/trips' }));
 
@@ -54,23 +133,23 @@ describe('rest trip handler', () => {
 
   test('owner can create and list trips', async () => {
     const ddb = {
-      put: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      query: jest.fn(() => promiseResult({ Items: [{ entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', title: 'Rome' }] }))
+      put:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      query:      jest.fn().mockResolvedValue({ Items: [{ entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', title: 'Rome' }] }),
     };
-    const handler = loadHandler({ ddb });
+    const { handler, ddb: ops } = loadHandler({ ddb });
 
     const createRes = await handler(event({
       method: 'POST',
       resource: '/trips',
       userId: 'u-1',
-      body: { title: 'Rome', collaborators: ['u-2'] }
+      body: { title: 'Rome', collaborators: ['u-2'] },
     }));
     const listRes = await handler(event({ method: 'GET', resource: '/trips', userId: 'u-1' }));
 
     expect(createRes.statusCode).toBe(201);
-    expect(ddb.put).toHaveBeenCalledTimes(1);
-    expect(ddb.batchWrite).toHaveBeenCalledTimes(1);
+    expect(ops.put).toHaveBeenCalledTimes(1);
+    expect(ops.batchWrite).toHaveBeenCalledTimes(1);
     expect(listRes.statusCode).toBe(200);
     expect(JSON.parse(listRes.body).items[0].tripId).toBe('t-1');
   });
@@ -78,11 +157,11 @@ describe('rest trip handler', () => {
   test('non-collaborator receives 403 when deleting someone else trip', async () => {
     const ddb = {
       get: jest.fn()
-        .mockReturnValueOnce(promiseResult({}))
-        .mockReturnValueOnce(promiseResult({ Item: { ownerId: 'u-1', role: 'editor' } }))
-        .mockReturnValueOnce(promiseResult({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1' } }))
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ Item: { ownerId: 'u-1', role: 'editor' } })
+        .mockResolvedValueOnce({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1' } }),
     };
-    const handler = loadHandler({ ddb });
+    const { handler } = loadHandler({ ddb });
 
     const res = await handler(event({ method: 'DELETE', resource: '/trips/{tripId}', userId: 'u-2', tripId: 't-1' }));
 
@@ -91,20 +170,19 @@ describe('rest trip handler', () => {
   });
 
   test('version mismatch returns 409', async () => {
-    const conditionalError = new Error('conflict');
-    conditionalError.code = 'ConditionalCheckFailedException';
+    const conditionalError = Object.assign(new Error('conflict'), { name: 'ConditionalCheckFailedException' });
     const ddb = {
-      get: jest.fn(() => promiseResult({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', version: 2 } })),
-      update: jest.fn(() => promiseReject(conditionalError))
+      get:    jest.fn().mockResolvedValue({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', version: 2 } }),
+      update: jest.fn().mockRejectedValue(conditionalError),
     };
-    const handler = loadHandler({ ddb });
+    const { handler } = loadHandler({ ddb });
 
     const res = await handler(event({
       method: 'PUT',
       resource: '/trips/{tripId}',
       userId: 'u-1',
       tripId: 't-1',
-      body: { version: 1, title: 'Updated' }
+      body: { version: 1, title: 'Updated' },
     }));
 
     expect(res.statusCode).toBe(409);
@@ -112,11 +190,11 @@ describe('rest trip handler', () => {
   });
 
   test('attachment upload URL rejects unsupported file types before S3 signing', async () => {
-    const s3 = { getSignedUrlPromise: jest.fn() };
+    const mockGetSignedUrl = jest.fn();
     const ddb = {
-      get: jest.fn(() => promiseResult({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', version: 1 } }))
+      get: jest.fn().mockResolvedValue({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', version: 1 } }),
     };
-    const handler = loadHandler({ ddb, s3 });
+    const { handler } = loadHandler({ ddb, s3Presigner: mockGetSignedUrl });
 
     const res = await handler(event({
       method: 'POST',
@@ -128,24 +206,23 @@ describe('rest trip handler', () => {
         fileType: 'application/x-msdownload',
         fileSize: 100,
         relatedItemType: 'flight',
-        relatedItemId: 'flight-1'
-      }
+        relatedItemId: 'flight-1',
+      },
     }));
 
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body).error.code).toBe('UNSUPPORTED_FILE_TYPE');
-    expect(s3.getSignedUrlPromise).not.toHaveBeenCalled();
+    expect(mockGetSignedUrl).not.toHaveBeenCalled();
   });
 
   test('attachment complete does not create metadata when S3 upload is missing', async () => {
-    const s3 = {
-      headObject: jest.fn(() => promiseReject(Object.assign(new Error('missing'), { code: 'NotFound' })))
-    };
+    const notFoundErr = Object.assign(new Error('missing'), { name: 'NotFound' });
+    const mockS3Send = jest.fn().mockRejectedValue(notFoundErr);
     const ddb = {
-      get: jest.fn(() => promiseResult({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', version: 1 } })),
-      put: jest.fn()
+      get: jest.fn().mockResolvedValue({ Item: { entityType: 'Trip', tripId: 't-1', ownerId: 'u-1', version: 1 } }),
+      put: jest.fn().mockResolvedValue({}),
     };
-    const handler = loadHandler({ ddb, s3 });
+    const { handler, ddb: ops } = loadHandler({ ddb, s3Send: mockS3Send });
 
     const res = await handler(event({
       method: 'POST',
@@ -159,12 +236,12 @@ describe('rest trip handler', () => {
         fileSize: 100,
         s3Key: 'trip-documents/u-1/t-1/f-1/ticket.pdf',
         relatedItemType: 'flight',
-        relatedItemId: 'flight-1'
-      }
+        relatedItemId: 'flight-1',
+      },
     }));
 
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body).error.code).toBe('UPLOAD_NOT_FOUND');
-    expect(ddb.put).not.toHaveBeenCalled();
+    expect(ops.put).not.toHaveBeenCalled();
   });
 });

@@ -7,7 +7,7 @@ s3_prefix = "tripwiz"
 region = "us-east-1"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "AdminEmail=\"amituniversitymail@gmail.com\" SourceEmail=\"amituniversitymail@gmail.com\" AdminBootstrapEmails=\"amituniversitymail@gmail.com,davidkitinberg@gmail.com\""
+parameter_overrides = "AdminEmail=\"amituniversitymail@gmail.com\" SourceEmail=\"amituniversitymail@gmail.com\" AdminBootstrapEmails=\"amituniversitymail@gmail.com,davidkitinberg@gmail.com\" FrontendUrl=\"https://main.d1qe3fil02rb8e.amplifyapp.com\""
 image_repositories = []
 
 [default.global.parameters]
