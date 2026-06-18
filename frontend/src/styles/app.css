@@ -1900,10 +1900,37 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: 0.4rem;
   font-size: 0.8125rem;
 }
+.share-notice {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  background: rgba(99,102,241,0.12);
+  border: 1px solid rgba(99,102,241,0.3);
+  color: #a5b4fc;
+  border-radius: 0.4rem;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
 .share-hint {
   margin-top: 0.4rem;
   font-size: 0.7rem;
   color: rgba(255,255,255,0.28);
+}
+
+/* [Review #7] Link-sharing opt-in toggle */
+.share-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.78rem;
+  color: rgba(255,255,255,0.7);
+  cursor: pointer;
+}
+.share-toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: #7c3aed;
+  cursor: pointer;
 }
 
 /* People list */

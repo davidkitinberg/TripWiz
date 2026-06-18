@@ -11,7 +11,7 @@ yarn-debug.log*
 yarn-error.log*
 dist/
 build/
-.next/ # (אם במקרה בחרתם לעבוד עם Next.js)
+.next/ # (in case you choose to work with Next.js)
 out/
 .vscode/
 .idea/

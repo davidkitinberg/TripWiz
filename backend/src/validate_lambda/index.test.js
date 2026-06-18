@@ -3,20 +3,85 @@
  * @authors David Kitinberg, Amit Bitton, Sagi Hassid
  */
 
-function loadHandler({ ddb, sns, secrets, fetchImpl }) {
+function loadHandler({ ddb = {}, sns = {}, secrets = {}, fetchImpl } = {}) {
   jest.resetModules();
-  jest.doMock('aws-sdk', () => ({
-    DynamoDB: { DocumentClient: jest.fn(() => ddb) },
-    SNS: jest.fn(() => sns),
-    SecretsManager: jest.fn(() => secrets),
-    Location: jest.fn(() => ({ searchPlaceIndexForPosition: jest.fn(() => promiseResult({ Results: [] })) }))
+
+  const ops = {
+    get:        ddb.get        || jest.fn().mockResolvedValue({}),
+    put:        ddb.put        || jest.fn().mockResolvedValue({}),
+    batchWrite: ddb.batchWrite || jest.fn().mockResolvedValue({}),
+    query:      ddb.query      || jest.fn().mockResolvedValue({ Items: [] }),
+  };
+
+  const mockDdb = {
+    ...ops,
+    send: jest.fn((cmd) => {
+      const t = cmd.constructor.name;
+      if (t === 'GetCommand')        return ops.get(cmd.input);
+      if (t === 'PutCommand')        return ops.put(cmd.input);
+      if (t === 'BatchWriteCommand') return ops.batchWrite(cmd.input);
+      if (t === 'QueryCommand')      return ops.query(cmd.input);
+    }),
+  };
+
+  const snsPublish = sns.publish || jest.fn().mockResolvedValue({});
+  const mockSns = {
+    publish: snsPublish,
+    send: jest.fn((cmd) => {
+      if (cmd.constructor.name === 'PublishCommand') return snsPublish(cmd.input);
+    }),
+  };
+
+  const secretsGetValue = secrets.getSecretValue || jest.fn().mockResolvedValue({ SecretString: '{}' });
+  const mockSecrets = {
+    getSecretValue: secretsGetValue,
+    send: jest.fn((cmd) => {
+      if (cmd.constructor.name === 'GetSecretValueCommand') return secretsGetValue(cmd.input);
+    }),
+  };
+
+  jest.doMock('@aws-sdk/client-dynamodb', () => ({
+    DynamoDBClient: jest.fn(() => ({})),
   }));
+
+  jest.doMock('@aws-sdk/lib-dynamodb', () => ({
+    DynamoDBDocumentClient: { from: jest.fn(() => mockDdb) },
+    GetCommand:        class GetCommand        { constructor(i) { this.input = i; } },
+    PutCommand:        class PutCommand        { constructor(i) { this.input = i; } },
+    BatchWriteCommand: class BatchWriteCommand { constructor(i) { this.input = i; } },
+    QueryCommand:      class QueryCommand      { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-sns', () => ({
+    SNSClient:      jest.fn(() => mockSns),
+    PublishCommand: class PublishCommand { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-secrets-manager', () => ({
+    SecretsManagerClient:  jest.fn(() => mockSecrets),
+    GetSecretValueCommand: class GetSecretValueCommand { constructor(i) { this.input = i; } },
+  }));
+
+  jest.doMock('@aws-sdk/client-location', () => ({
+    LocationClient:                 jest.fn(() => ({ send: jest.fn().mockResolvedValue({ Results: [] }) })),
+    SearchPlaceIndexForTextCommand: class SearchPlaceIndexForTextCommand { constructor(i) { this.input = i; } },
+  }));
+
   jest.doMock('node-fetch', () => fetchImpl || jest.fn());
+
   return require('./index').handler;
 }
 
-function promiseResult(value) {
-  return { promise: jest.fn().mockResolvedValue(value) };
+// [Review #1] The trip GSI is write-sharded. A real trip lives in exactly ONE shard, so
+// this mock returns it for shard 0's range query and empty for all other queries.
+function tripRangeQueryMock(trip) {
+  return jest.fn((params) => {
+    const pk = params && params.ExpressionAttributeValues && params.ExpressionAttributeValues[':pk'];
+    if (params && params.IndexName === 'GSI1' && pk === 'TRIP#0') {
+      return Promise.resolve({ Items: [trip] });
+    }
+    return Promise.resolve({ Items: [] });
+  });
 }
 
 function setupEnv() {
@@ -29,10 +94,7 @@ function openMeteoForecast(startIso, pop, weathercode, windSpeed = 5, windGusts 
   const hour = startIso.slice(0, 13) + ':00';
   const day = startIso.slice(0, 10);
   return {
-    hourly_units: {
-      windspeed_10m: 'kn',
-      wind_gusts_10m: 'kn'
-    },
+    hourly_units: { windspeed_10m: 'kn', wind_gusts_10m: 'kn' },
     hourly: {
       time: [hour],
       temperature_2m: [22],
@@ -42,24 +104,24 @@ function openMeteoForecast(startIso, pop, weathercode, windSpeed = 5, windGusts 
       wind_gusts_10m: [windGusts],
       relativehumidity_2m: [65],
       precipitation_probability: [Math.round(pop * 100)],
-      cloud_cover: [cloudCover]
+      cloud_cover: [cloudCover],
     },
     daily: {
       time: [day],
       weathercode: [weathercode],
       temperature_2m_max: [24],
       temperature_2m_min: [18],
-      precipitation_probability_max: [Math.round(pop * 100)]
-    }
+      precipitation_probability_max: [Math.round(pop * 100)],
+    },
   };
 }
 
 function buildDdbWithTrip(trip) {
   return {
-    query: jest.fn(() => promiseResult({ Items: [trip] })),
-    get: jest.fn(() => promiseResult({})),
-    batchWrite: jest.fn(() => promiseResult({})),
-    put: jest.fn(() => promiseResult({}))
+    query:      tripRangeQueryMock(trip),
+    get:        jest.fn().mockResolvedValue({}),
+    batchWrite: jest.fn().mockResolvedValue({}),
+    put:        jest.fn().mockResolvedValue({}),
   };
 }
 
@@ -70,14 +132,14 @@ async function runForecastCase({ title = 'Observation deck', pop = 0.1, weatherc
     entityType: 'Trip',
     ownerId: 'u-1',
     tripId: 't-1',
-    itinerary: [{ slotId: 's-1', title, start, coords: { lat: 32.08, lng: 34.78 }, ...(activityType ? { activityType } : {}) }]
+    itinerary: [{ slotId: 's-1', title, start, coords: { lat: 32.08, lng: 34.78 }, ...(activityType ? { activityType } : {}) }],
   };
   const ddb = buildDdbWithTrip(trip);
-  const sns = { publish: jest.fn(() => promiseResult({})) };
-  const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+  const sns = { publish: jest.fn().mockResolvedValue({}) };
+  const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
   const fetchImpl = jest.fn().mockResolvedValue({
     ok: true,
-    json: async () => openMeteoForecast(start, pop, weathercode, windSpeed, windGusts, cloudCover)
+    json: async () => openMeteoForecast(start, pop, weathercode, windSpeed, windGusts, cloudCover),
   });
 
   const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -103,16 +165,16 @@ describe('validate_lambda', () => {
       ownerId: 'u-1',
       tripId: 't-1',
       title: 'Rainy Trip',
-      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }]
+      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }],
     };
     const ddb = {
-      query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      put: jest.fn(() => promiseResult({}))
+      query:      tripRangeQueryMock(trip),
+      get:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      put:        jest.fn().mockResolvedValue({}),
     };
-    const sns = { publish: jest.fn(() => promiseResult({})) };
-    const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+    const sns = { publish: jest.fn().mockResolvedValue({}) };
+    const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
     const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.8, 61) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -130,16 +192,16 @@ describe('validate_lambda', () => {
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
-      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }]
+      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }],
     };
     const ddb = {
-      query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      put: jest.fn(() => promiseResult({}))
+      query:      tripRangeQueryMock(trip),
+      get:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      put:        jest.fn().mockResolvedValue({}),
     };
-    const sns = { publish: jest.fn(() => promiseResult({})) };
-    const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+    const sns = { publish: jest.fn().mockResolvedValue({}) };
+    const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
     const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.1, 0) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -164,7 +226,7 @@ describe('validate_lambda', () => {
       title: 'Panoramic viewpoint',
       activityType: 'INDOOR',
       pop: 0.9,
-      weathercode: 61
+      weathercode: 61,
     });
 
     expect(res.statusCode).toBe(200);
@@ -176,7 +238,7 @@ describe('validate_lambda', () => {
   test('auto activity type keeps keyword-based detection', async () => {
     const { res, ddb } = await runForecastCase({
       title: 'Panoramic viewpoint',
-      activityType: 'AUTO'
+      activityType: 'AUTO',
     });
 
     expect(res.statusCode).toBe(200);
@@ -203,7 +265,7 @@ describe('validate_lambda', () => {
 
   test.each([
     [38, 3],
-    [50, 4]
+    [50, 4],
   ])('does not publish scenic cloud alert for %i percent cloud cover (%i oktas)', async (cloudCover, oktas) => {
     const { res, ddb, sns } = await runForecastCase({ title: 'Scenic viewpoint', cloudCover });
 
@@ -246,16 +308,16 @@ describe('validate_lambda', () => {
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
-      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }]
+      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }],
     };
     const ddb = {
-      query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      put: jest.fn(() => promiseResult({}))
+      query:      tripRangeQueryMock(trip),
+      get:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      put:        jest.fn().mockResolvedValue({}),
     };
-    const sns = { publish: jest.fn(() => promiseResult({})) };
-    const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+    const sns = { publish: jest.fn().mockResolvedValue({}) };
+    const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
     const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.1, 0, 10, 8) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -273,16 +335,16 @@ describe('validate_lambda', () => {
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
-      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }]
+      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }],
     };
     const ddb = {
-      query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      put: jest.fn(() => promiseResult({}))
+      query:      tripRangeQueryMock(trip),
+      get:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      put:        jest.fn().mockResolvedValue({}),
     };
-    const sns = { publish: jest.fn(() => promiseResult({})) };
-    const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+    const sns = { publish: jest.fn().mockResolvedValue({}) };
+    const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
     const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.1, 0, 5, 15) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -300,16 +362,16 @@ describe('validate_lambda', () => {
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
-      itinerary: [{ slotId: 's-1', title: 'Ski lesson', start, coords: { lat: 46.02, lng: 7.75 } }]
+      itinerary: [{ slotId: 's-1', title: 'Ski lesson', start, coords: { lat: 46.02, lng: 7.75 } }],
     };
     const ddb = {
-      query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      put: jest.fn(() => promiseResult({}))
+      query:      tripRangeQueryMock(trip),
+      get:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      put:        jest.fn().mockResolvedValue({}),
     };
-    const sns = { publish: jest.fn(() => promiseResult({})) };
-    const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+    const sns = { publish: jest.fn().mockResolvedValue({}) };
+    const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
     const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.1, 71, 20, 8) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -327,16 +389,16 @@ describe('validate_lambda', () => {
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
-      itinerary: [{ slotId: 's-1', title: 'Ski lesson', start, coords: { lat: 46.02, lng: 7.75 } }]
+      itinerary: [{ slotId: 's-1', title: 'Ski lesson', start, coords: { lat: 46.02, lng: 7.75 } }],
     };
     const ddb = {
-      query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      put: jest.fn(() => promiseResult({}))
+      query:      tripRangeQueryMock(trip),
+      get:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      put:        jest.fn().mockResolvedValue({}),
     };
-    const sns = { publish: jest.fn(() => promiseResult({})) };
-    const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+    const sns = { publish: jest.fn().mockResolvedValue({}) };
+    const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
     const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.1, 71, 5, 25) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -354,16 +416,16 @@ describe('validate_lambda', () => {
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
-      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }]
+      itinerary: [{ slotId: 's-1', start, coords: { lat: 32.08, lng: 34.78 } }],
     };
     const ddb = {
-      query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      put: jest.fn(() => promiseResult({}))
+      query:      tripRangeQueryMock(trip),
+      get:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      put:        jest.fn().mockResolvedValue({}),
     };
-    const sns = { publish: jest.fn(() => promiseResult({})) };
-    const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+    const sns = { publish: jest.fn().mockResolvedValue({}) };
+    const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
     const fetchImpl = jest.fn().mockResolvedValue({ ok: true, json: async () => openMeteoForecast(start, 0.1, 0) });
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -380,16 +442,16 @@ describe('validate_lambda', () => {
       entityType: 'Trip',
       ownerId: 'u-1',
       tripId: 't-1',
-      itinerary: [{ slotId: 's-1', start: new Date().toISOString() }]
+      itinerary: [{ slotId: 's-1', start: new Date().toISOString() }],
     };
     const ddb = {
-      query: jest.fn(() => promiseResult({ Items: [trip] })),
-      get: jest.fn(() => promiseResult({})),
-      batchWrite: jest.fn(() => promiseResult({})),
-      put: jest.fn(() => promiseResult({}))
+      query:      tripRangeQueryMock(trip),
+      get:        jest.fn().mockResolvedValue({}),
+      batchWrite: jest.fn().mockResolvedValue({}),
+      put:        jest.fn().mockResolvedValue({}),
     };
-    const sns = { publish: jest.fn(() => promiseResult({})) };
-    const secrets = { getSecretValue: jest.fn(() => promiseResult({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) })) };
+    const sns = { publish: jest.fn().mockResolvedValue({}) };
+    const secrets = { getSecretValue: jest.fn().mockResolvedValue({ SecretString: JSON.stringify({ apiKey: 'fake-key' }) }) };
     const fetchImpl = jest.fn();
 
     const handler = loadHandler({ ddb, sns, secrets, fetchImpl });
@@ -402,11 +464,7 @@ describe('validate_lambda', () => {
 
   test('missing configuration returns controlled error', async () => {
     delete process.env.TABLE_NAME;
-    const handler = loadHandler({
-      ddb: {},
-      sns: {},
-      secrets: {}
-    });
+    const handler = loadHandler({ ddb: {}, sns: {}, secrets: {} });
 
     const res = await handler({});
 

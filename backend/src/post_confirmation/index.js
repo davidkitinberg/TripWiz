@@ -5,9 +5,10 @@
 
 'use strict';
 
-const AWS = require('aws-sdk');
+const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 
-const ddb = new AWS.DynamoDB.DocumentClient();
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const TABLE_NAME = process.env.TABLE_NAME;
 
@@ -22,7 +23,7 @@ exports.handler = async (event) => {
 
     if (userId && email) {
       const now = new Date().toISOString();
-      await ddb.put({
+      await ddb.send(new PutCommand({
         TableName: TABLE_NAME,
         Item: {
           PK:              `USER#${userId}`,
@@ -40,10 +41,10 @@ exports.handler = async (event) => {
           updatedAt:       now,
         },
         ConditionExpression: 'attribute_not_exists(PK)',
-      }).promise();
+      }));
     }
   } catch (err) {
-    if (err.code !== 'ConditionalCheckFailedException') {
+    if (err.name !== 'ConditionalCheckFailedException') {
       console.error('Failed to create default user prefs on signup', err);
     }
   }

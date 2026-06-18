@@ -46,6 +46,9 @@ Resources:
       CodeUri: ../src/
       Handler: validate_lambda/index.handler
       Runtime: nodejs24.x
+      # [Review #6] Multi-slot itineraries make several sequential external calls
+      # (Open-Meteo + Amazon Location) per stop, so the 10s global default is too tight.
+      Timeout: 60
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TripWizTable
@@ -176,6 +179,12 @@ Resources:
       Handler: rest_handlers/trips.handler
       Runtime: nodejs24.x
       Timeout: 60
+      # [Review #8] We previously reserved concurrency here to cap the blast radius / cost
+      # of the expensive routes this function owns (Bedrock /optimize, Amazon Location
+      # /places/search & /routes/calculate). That reservation is disabled because this
+      # account's total Lambda concurrency limit is too low to carve out a reserve without
+      # starving the other functions (AWS enforces a minimum unreserved pool). Re-enable
+      # ReservedConcurrentExecutions once the account concurrency limit is raised.
       Environment:
         Variables:
           TABLE_NAME: !Ref TripWizTable
@@ -245,11 +254,12 @@ Resources:
               - execute-api:ManageConnections
             Resource:
               - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*"
+        # [Review #8] Scope SES to the verified sender identity instead of '*'
         - Statement:
             Effect: Allow
             Action:
               - ses:SendEmail
-            Resource: '*'
+            Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${SourceEmail}"
       Events:
         GetTrips:
           Type: Api
@@ -574,11 +584,8 @@ Resources:
       DataSource: Esri
       Description: "Route calculator for road-following itinerary routes"
 
-  OpenWeatherSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: TripWiz/OpenWeatherApiKey
-      Description: "OpenWeatherMap API key for TripWiz (store value before deploy)"
+  # [Review #8] OpenWeatherSecret removed — weather validation uses keyless Open-Meteo
+  # (see validate_lambda/index.js fetchForecast), so the secret was dead infrastructure.
 
   MappingApiSecret:
     Type: AWS::SecretsManager::Secret
@@ -607,11 +614,12 @@ Resources:
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref TripWizTable
+        # [Review #8] Scope SES to the verified sender identity instead of '*'
         - Statement:
             Effect: Allow
             Action:
               - ses:SendEmail
-            Resource: '*'
+            Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${SourceEmail}"
       Events:
         DailyReminder:
           Type: Schedule
@@ -633,6 +641,7 @@ Resources:
           ADMIN_EMAIL: !Ref AdminEmail
           FRONTEND_URL: !Ref FrontendUrl
       Policies:
+        # [Review #8] Scope SES to the verified sender identity instead of '*'
         - Statement:
             - Effect: Allow
               Action:

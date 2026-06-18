@@ -5,12 +5,18 @@
 
 'use strict';
 
-const AWS = require('aws-sdk');
+const { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, BatchWriteCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
+const { LocationClient, SearchPlaceIndexForTextCommand } = require('@aws-sdk/client-location');
 const fetch = require('node-fetch');
 
-const dynamodb = new AWS.DynamoDB.DocumentClient();
-const sns = new AWS.SNS();
-const location = new AWS.Location();
+// [Review #1] Scatter-gather over the sharded trip GSI partitions
+const { queryTripsByStartRange } = require('../lib/trips-index');
+
+const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const sns = new SNSClient({});
+const location = new LocationClient({});
 
 const TABLE_NAME      = process.env.TABLE_NAME;
 const ALERTS_TOPIC_ARN = process.env.ALERTS_TOPIC_ARN;
@@ -124,28 +130,34 @@ function findForecastForTimestamp(forecast, timestampSec) {
     }
   }
 
-  // Hourly — preferred path (full 16-day window)
+  // Hourly — preferred path (full 16-day window).
+  // Skip null-temperature entries (the last few hours of the forecast window can be null
+  // for some US models, e.g. GFS/NAM), so bestIdx always lands on a valid data point.
   if (hourly?.time?.length > 0) {
-    let bestIdx  = 0;
+    let bestIdx  = -1;
     let bestDiff = Infinity;
     for (let i = 0; i < hourly.time.length; i++) {
+      if (hourly.temperature_2m[i] == null) continue;
       const diff = Math.abs(Math.floor(new Date(hourly.time[i]).getTime() / 1000) - timestampSec);
       if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
     }
+    if (bestIdx === -1) return null; // no valid temperature in the hourly window
     const { condition, description } = wmoToCondition(hourly.weathercode[bestIdx]);
     const windSpeedKnots = windToKnots(hourly.windspeed_10m?.[bestIdx], forecast.hourly_units?.windspeed_10m);
     const windGustsKnots = windToKnots(hourly.wind_gusts_10m?.[bestIdx], forecast.hourly_units?.wind_gusts_10m);
     const { cloudCoverPercent, cloudCoverOktas } = normalizeCloudCover(hourly.cloud_cover?.[bestIdx]);
+    const rawTemp = hourly.temperature_2m[bestIdx];
+    const rawFeels = hourly.apparent_temperature?.[bestIdx];
     return {
-      tempC:      Math.round(hourly.temperature_2m[bestIdx]),
-      feelsLikeC: Math.round(hourly.apparent_temperature[bestIdx]),
-      tempMaxC:   tempMaxC ?? Math.round(hourly.temperature_2m[bestIdx]),
-      tempMinC:   tempMinC ?? Math.round(hourly.temperature_2m[bestIdx]),
+      tempC:      Math.round(rawTemp),
+      feelsLikeC: rawFeels != null ? Math.round(rawFeels) : Math.round(rawTemp),
+      tempMaxC:   tempMaxC ?? Math.round(rawTemp),
+      tempMinC:   tempMinC ?? Math.round(rawTemp),
       condition,
       description,
       icon:       '',
-      pop:        (hourly.precipitation_probability[bestIdx] || 0) / 100,
-      humidity:   hourly.relativehumidity_2m[bestIdx] ?? null,
+      pop:        (hourly.precipitation_probability?.[bestIdx] || 0) / 100,
+      humidity:   hourly.relativehumidity_2m?.[bestIdx] ?? null,
       windSpeed:  windSpeedKnots,
       windSpeedKnots,
       windGustsKnots,
@@ -157,24 +169,27 @@ function findForecastForTimestamp(forecast, timestampSec) {
 
   // Daily fallback
   if (daily?.time?.length > 0) {
-    let bestIdx  = 0;
+    let bestIdx  = -1;
     let bestDiff = Infinity;
     for (let i = 0; i < daily.time.length; i++) {
+      if (daily.temperature_2m_max[i] == null && daily.temperature_2m_min[i] == null) continue;
       const diff = Math.abs(new Date(daily.time[i]) - new Date(slotDate));
       if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
     }
+    if (bestIdx === -1) return null;
     const { condition, description } = wmoToCondition(daily.weathercode[bestIdx]);
     const hi = daily.temperature_2m_max[bestIdx];
     const lo = daily.temperature_2m_min[bestIdx];
+    const avg = hi != null && lo != null ? (hi + lo) / 2 : (hi ?? lo);
     return {
-      tempC:      Math.round((hi + lo) / 2),
-      feelsLikeC: Math.round((hi + lo) / 2),
+      tempC:      Math.round(avg),
+      feelsLikeC: Math.round(avg),
       tempMaxC:   hi != null ? Math.round(hi) : null,
       tempMinC:   lo != null ? Math.round(lo) : null,
       condition,
       description,
       icon:       '',
-      pop:        (daily.precipitation_probability_max[bestIdx] || 0) / 100,
+      pop:        (daily.precipitation_probability_max?.[bestIdx] || 0) / 100,
       humidity:   null,
       windSpeed:  null,
       windSpeedKnots: null,
@@ -375,32 +390,32 @@ function getCoordinates(slot, item) {
 
 async function getTripItem(tripId, itemId) {
   if (!itemId) return null;
-  const res = await dynamodb.get({
+  const res = await dynamodb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { PK: `TRIP#${tripId}`, SK: `ITEM#${itemId}` }
-  }).promise();
+  }));
   return res.Item || null;
 }
 
 async function getOnDemandTrip(detail) {
   if (!detail || !detail.tripId || !detail.userId) return null;
 
-  const userTrip = await dynamodb.get({
+  const userTrip = await dynamodb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { PK: `USER#${detail.userId}`, SK: `TRIP#${detail.tripId}` }
-  }).promise();
+  }));
   if (userTrip.Item && userTrip.Item.entityType === 'Trip') return userTrip.Item;
 
-  const access = await dynamodb.get({
+  const access = await dynamodb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { PK: `TRIP#${detail.tripId}`, SK: `ACCESS#${detail.userId}` }
-  }).promise();
+  }));
   if (!access.Item) return null;
 
-  const ownerTrip = await dynamodb.get({
+  const ownerTrip = await dynamodb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { PK: `USER#${access.Item.ownerId}`, SK: `TRIP#${detail.tripId}` }
-  }).promise();
+  }));
   return ownerTrip.Item || null;
 }
 
@@ -408,19 +423,7 @@ async function getOnDemandTrip(detail) {
 async function getScheduledTrips() {
   const now      = new Date();
   const tomorrow = new Date(now.getTime() + 24 * 3600 * 1000);
-  const res = await dynamodb.query({
-    TableName: TABLE_NAME,
-    IndexName: 'GSI1',
-    KeyConditionExpression: 'GSI1PK = :gpk AND tripStart BETWEEN :now AND :tomorrow',
-    FilterExpression: 'attribute_not_exists(deleted) OR deleted = :notDeleted',
-    ExpressionAttributeValues: {
-      ':gpk':        'TRIP',
-      ':now':        now.toISOString(),
-      ':tomorrow':   tomorrow.toISOString(),
-      ':notDeleted': false
-    }
-  }).promise();
-  return res.Items || [];
+  return queryTripsByStartRange(dynamodb, TABLE_NAME, now.toISOString(), tomorrow.toISOString());
 }
 
 async function getTrips(event) {
@@ -482,24 +485,24 @@ async function clearValidationData(tripId) {
   for (const prefix of ['ALERT#', 'FALLBACKS#', 'WEATHER#']) {
     let lastKey;
     do {
-      const res = await dynamodb.query({
+      const res = await dynamodb.send(new QueryCommand({
         TableName: TABLE_NAME,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
         ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': prefix },
         ProjectionExpression: 'PK, SK',
         ExclusiveStartKey: lastKey
-      }).promise();
+      }));
       (res.Items || []).forEach((it) => keys.push({ PK: it.PK, SK: it.SK }));
       lastKey = res.LastEvaluatedKey;
     } while (lastKey);
   }
 
   for (let i = 0; i < keys.length; i += 25) {
-    await dynamodb.batchWrite({
+    await dynamodb.send(new BatchWriteCommand({
       RequestItems: {
         [TABLE_NAME]: keys.slice(i, i + 25).map((Key) => ({ DeleteRequest: { Key } }))
       }
-    }).promise();
+    }));
   }
 }
 
@@ -512,12 +515,12 @@ async function findFallbacks(coords, max = 5) {
   for (const term of FALLBACK_SEARCH_TERMS) {
     if (suggestions.length >= max) break;
     try {
-      const res = await location.searchPlaceIndexForText({
+      const res = await location.send(new SearchPlaceIndexForTextCommand({
         IndexName:    PLACE_INDEX_NAME,
         Text:         term,
         BiasPosition: [coords.lng, coords.lat],
         MaxResults:   3
-      }).promise();
+      }));
       for (const r of res.Results || []) {
         const place = r.Place || {};
         const point = place.Geometry && place.Geometry.Point;
@@ -552,7 +555,7 @@ async function findFallbacks(coords, max = 5) {
 async function persistWeatherData(tripId, slotId, wd) {
   const now = new Date();
   const ttl = Math.floor(now.getTime() / 1000) + 7 * 24 * 3600;
-  await dynamodb.put({
+  await dynamodb.send(new PutCommand({
     TableName: TABLE_NAME,
     Item: {
       PK:             `TRIP#${tripId}`,
@@ -584,14 +587,14 @@ async function persistWeatherData(tripId, slotId, wd) {
       createdAt:      now.toISOString(),
       ttl,
     }
-  }).promise();
+  }));
 }
 
 async function persistFallbacks(tripId, slotId, suggestions) {
   if (!suggestions || suggestions.length === 0) return;
   const now = new Date();
   const ttl = Math.floor(now.getTime() / 1000) + 7 * 24 * 3600;
-  await dynamodb.put({
+  await dynamodb.send(new PutCommand({
     TableName: TABLE_NAME,
     Item: {
       PK:         `TRIP#${tripId}`,
@@ -603,13 +606,13 @@ async function persistFallbacks(tripId, slotId, suggestions) {
       createdAt:  now.toISOString(),
       ttl
     }
-  }).promise();
+  }));
 }
 
 async function persistAlert(wd, tripId) {
   const now = new Date();
   const ttl = Math.floor(now.getTime() / 1000) + 7 * 24 * 3600;
-  await dynamodb.put({
+  await dynamodb.send(new PutCommand({
     TableName: TABLE_NAME,
     Item: {
       PK:                 `TRIP#${tripId}`,
@@ -630,12 +633,12 @@ async function persistAlert(wd, tripId) {
       createdAt:          now.toISOString(),
       ttl
     }
-  }).promise();
+  }));
 }
 
 async function persistValidationMeta(tripId) {
   const now = new Date();
-  await dynamodb.put({
+  await dynamodb.send(new PutCommand({
     TableName: TABLE_NAME,
     Item: {
       PK:              `TRIP#${tripId}`,
@@ -644,7 +647,7 @@ async function persistValidationMeta(tripId) {
       tripId,
       lastValidatedAt: now.toISOString()
     }
-  }).promise();
+  }));
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -670,57 +673,68 @@ exports.handler = async (event) => {
         console.warn('Failed to clear prior validation data', { tripId: trip.tripId, error: err.message });
       }
 
-      for (const slot of trip.itinerary || []) {
-        try {
-          const wd = await getWeatherForSlot(trip, slot);
-          if (!wd) continue;
+      // [Review #6] Process each stop's external lookups (Open-Meteo forecast +
+      // Amazon Location fallbacks) concurrently rather than sequentially, so a long
+      // itinerary stays well under the function timeout. Each slot is independent.
+      const slotResults = await Promise.all(
+        (trip.itinerary || []).map(async (slot) => {
+          try {
+            const wd = await getWeatherForSlot(trip, slot);
+            if (!wd) return null;
 
-          await persistWeatherData(trip.tripId, wd.slotId, wd);
-          weatherSaved++;
+            await persistWeatherData(trip.tripId, wd.slotId, wd);
 
-          if (wd.isAlert) {
-            alertsPublished++;
-            await persistAlert(wd, trip.tripId);
-            // [Feature #41] Publish the alert to SNS (fans out to the SES emailer)
-            await sns.publish({
-              TopicArn: ALERTS_TOPIC_ARN,
-              Message: JSON.stringify({
-                tripId: trip.tripId,
-                userId: trip.ownerId,
-                tripTitle: trip.title || 'Untitled trip',
-                reason: wd.reason,
-                slot: {
-                  slotId: wd.slotId,
-                  title: wd.slotTitle,
-                  start: wd.slotStart,
-                  coords: wd.coords,
-                  category: wd.category,
-                },
-                weather: {
-                  condition: wd.condition,
-                  description: wd.description,
-                  tempC: wd.tempC,
-                  feelsLikeC: wd.feelsLikeC,
-                  pop: wd.pop,
-                  windSpeedKnots: wd.windSpeedKnots,
-                  windGustsKnots: wd.windGustsKnots,
-                  cloudCoverOktas: wd.cloudCoverOktas,
-                },
-              }),
-              Subject: `TripWiz weather alert: ${trip.title || trip.tripId}`,
-            }).promise();
-            try {
-              const suggestions = await findFallbacks(wd.coords);
-              if (suggestions.length > 0) {
-                await persistFallbacks(trip.tripId, wd.slotId, suggestions);
+            if (wd.isAlert) {
+              await persistAlert(wd, trip.tripId);
+              // [Feature #41] Publish the alert to SNS (fans out to the SES emailer)
+              await sns.send(new PublishCommand({
+                TopicArn: ALERTS_TOPIC_ARN,
+                Message: JSON.stringify({
+                  tripId: trip.tripId,
+                  userId: trip.ownerId,
+                  tripTitle: trip.title || 'Untitled trip',
+                  reason: wd.reason,
+                  slot: {
+                    slotId: wd.slotId,
+                    title: wd.slotTitle,
+                    start: wd.slotStart,
+                    coords: wd.coords,
+                    category: wd.category,
+                  },
+                  weather: {
+                    condition: wd.condition,
+                    description: wd.description,
+                    tempC: wd.tempC,
+                    feelsLikeC: wd.feelsLikeC,
+                    pop: wd.pop,
+                    windSpeedKnots: wd.windSpeedKnots,
+                    windGustsKnots: wd.windGustsKnots,
+                    cloudCoverOktas: wd.cloudCoverOktas,
+                  },
+                }),
+                Subject: `TripWiz weather alert: ${trip.title || trip.tripId}`,
+              }));
+              try {
+                const suggestions = await findFallbacks(wd.coords);
+                if (suggestions.length > 0) {
+                  await persistFallbacks(trip.tripId, wd.slotId, suggestions);
+                }
+              } catch (err) {
+                console.warn('Fallback search failed', { tripId: trip.tripId, slotId: wd.slotId, error: err.message });
               }
-            } catch (err) {
-              console.warn('Fallback search failed', { tripId: trip.tripId, slotId: wd.slotId, error: err.message });
             }
+            return { isAlert: wd.isAlert };
+          } catch (err) {
+            console.warn('Slot weather check failed', { tripId: trip.tripId, slotId: slot.slotId, error: err.message });
+            return null;
           }
-        } catch (err) {
-          console.warn('Slot weather check failed', { tripId: trip.tripId, slotId: slot.slotId, error: err.message });
-        }
+        })
+      );
+
+      for (const r of slotResults) {
+        if (!r) continue;
+        weatherSaved++;
+        if (r.isAlert) alertsPublished++;
       }
 
       try {

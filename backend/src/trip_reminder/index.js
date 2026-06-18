@@ -5,10 +5,15 @@
 
 'use strict';
 
-const AWS = require('aws-sdk');
+const { DynamoDBDocumentClient, GetCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
 
-const ddb = new AWS.DynamoDB.DocumentClient();
-const ses = new AWS.SES();
+// [Review #1] Scatter-gather over the sharded trip GSI partitions
+const { queryTripsByStartRange } = require('../lib/trips-index');
+
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ses = new SESClient({});
 
 const TABLE_NAME    = process.env.TABLE_NAME;
 const SOURCE_EMAIL  = process.env.SOURCE_EMAIL;
@@ -17,35 +22,23 @@ const REMINDER_DAYS = parseInt(process.env.REMINDER_DAYS || '2', 10);
 async function getUpcomingTrips() {
   const now    = new Date();
   const cutoff = new Date(now.getTime() + REMINDER_DAYS * 24 * 3600 * 1000);
-  const res = await ddb.query({
-    TableName: TABLE_NAME,
-    IndexName: 'GSI1',
-    KeyConditionExpression: 'GSI1PK = :gpk AND tripStart BETWEEN :now AND :cutoff',
-    FilterExpression: 'attribute_not_exists(deleted) OR deleted = :f',
-    ExpressionAttributeValues: {
-      ':gpk':    'TRIP',
-      ':now':    now.toISOString(),
-      ':cutoff': cutoff.toISOString(),
-      ':f':      false,
-    },
-  }).promise();
-  return res.Items || [];
+  return queryTripsByStartRange(ddb, TABLE_NAME, now.toISOString(), cutoff.toISOString());
 }
 
 async function getUserPrefs(userId) {
-  const res = await ddb.get({
+  const res = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { PK: `USER#${userId}`, SK: 'PREFS' },
-  }).promise();
+  }));
   return res.Item || null;
 }
 
 async function getActiveAlerts(tripId) {
-  const res = await ddb.query({
+  const res = await ddb.send(new QueryCommand({
     TableName: TABLE_NAME,
     KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skp)',
     ExpressionAttributeValues: { ':pk': `TRIP#${tripId}`, ':skp': 'ALERT#' },
-  }).promise();
+  }));
   return res.Items || [];
 }
 
@@ -150,14 +143,14 @@ exports.handler = async () => {
         ? `Weather alert for "${trip.title || 'Your Trip'}"`
         : `Reminder: "${trip.title || 'Your Trip'}" starts ${REMINDER_DAYS === 1 ? 'tomorrow' : `in ${REMINDER_DAYS} days`}`;
 
-      await ses.sendEmail({
+      await ses.send(new SendEmailCommand({
         Source:      SOURCE_EMAIL,
         Destination: { ToAddresses: [prefs.email] },
         Message: {
           Subject: { Data: subject, Charset: 'UTF-8' },
           Body:    { Html: { Data: html, Charset: 'UTF-8' } },
         },
-      }).promise();
+      }));
 
       sent++;
       console.log(`Sent reminder: trip=${trip.tripId} to=${prefs.email}`);

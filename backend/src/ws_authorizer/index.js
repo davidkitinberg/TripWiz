@@ -3,9 +3,9 @@
  * @authors David Kitinberg, Amit Bitton, Sagi Hassid
  */
 
-const AWS = require('aws-sdk');
+const { CognitoIdentityProviderClient, GetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
 
-const cognito = new AWS.CognitoIdentityServiceProvider();
+const cognito = new CognitoIdentityProviderClient({});
 
 function buildPolicy(effect, routeArn, principalId, context) {
   return {
@@ -36,12 +36,12 @@ exports.handler = async (event) => {
   if (!token) return buildPolicy('Deny', routeArn);
 
   try {
-    const user = await cognito.getUser({ AccessToken: token }).promise();
+    const user = await cognito.send(new GetUserCommand({ AccessToken: token }));
     const subAttr = (user.UserAttributes || []).find((attr) => attr.Name === 'sub');
     const sub = (subAttr && subAttr.Value) || user.Username;
     return buildPolicy('Allow', routeArn, sub, { sub, username: user.Username });
   } catch (err) {
-    console.warn('WebSocket authorizer rejected token', err.code || err.message);
+    console.warn('WebSocket authorizer rejected token', err.name || err.message);
     return buildPolicy('Deny', routeArn);
   }
 };
