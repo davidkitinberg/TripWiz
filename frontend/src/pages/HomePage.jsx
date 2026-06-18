@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Public landing page with hero section and product highlights.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { isAuthenticated } from '../services/auth';

@@ -1,3 +1,8 @@
+/**
+ * @fileoverview WebSocket authorizer Lambda validating Cognito access tokens on connect.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 const AWS = require('aws-sdk');
 
 const cognito = new AWS.CognitoIdentityServiceProvider();

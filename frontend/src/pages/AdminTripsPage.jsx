@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Admin trip moderation: list, hide, and delete trips.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useEffect, useRef, useState } from 'react';
 import { MoreVertical, EyeOff, Eye, Trash2, Search, X, MapPin, Calendar } from 'lucide-react';
 import { api } from '../services/api';

@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Amazon Cognito authentication: sign-up, sign-in, tokens, and session handling.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import {
   CognitoUserPool,
   CognitoUser,

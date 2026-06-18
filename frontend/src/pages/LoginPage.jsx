@@ -1,3 +1,8 @@
+/**
+ * @fileoverview User sign-up, sign-in, and email verification UI.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { signIn, signUp, confirmSignUp, resendConfirmationCode } from '../services/auth';

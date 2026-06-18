@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Frontend environment configuration for API Gateway, WebSocket, and Cognito.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 const config = {
   region: 'us-east-1',
   cognito: {

@@ -6,23 +6,8 @@
     "test": "jest --runInBand"
   },
   "dependencies": {
-<<<<<<< Updated upstream
-    "aws-sdk": "^2.1693.0",
-=======
-    "@aws-sdk/client-apigatewaymanagementapi": "^3",
-    "@aws-sdk/client-bedrock-runtime": "^3",
-    "@aws-sdk/client-cognito-identity-provider": "^3",
-    "@aws-sdk/client-dynamodb": "^3",
-    "@aws-sdk/client-lambda": "^3",
-    "@aws-sdk/client-location": "^3",
-    "@aws-sdk/client-s3": "^3",
-    "@aws-sdk/client-secrets-manager": "^3",
     "@aws-sdk/client-ses": "^3",
-    "@aws-sdk/client-sesv2": "^3",
-    "@aws-sdk/client-sns": "^3",
-    "@aws-sdk/lib-dynamodb": "^3",
-    "@aws-sdk/s3-request-presigner": "^3",
->>>>>>> Stashed changes
+    "aws-sdk": "^2.1693.0",
     "node-fetch": "^2.6.7"
   },
   "devDependencies": {

@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Shared HTML email templates and SES delivery helpers for TripWiz notifications.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 'use strict';
 
 const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');

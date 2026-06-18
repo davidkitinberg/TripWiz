@@ -634,18 +634,11 @@ Resources:
           FRONTEND_URL: !Ref FrontendUrl
       Policies:
         - Statement:
-<<<<<<< Updated upstream
-            Effect: Allow
-            Action:
-              - ses:SendEmail
-            Resource: '*'
-=======
             - Effect: Allow
               Action:
                 - ses:SendEmail
                 - ses:SendRawEmail
               Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*"
->>>>>>> Stashed changes
       Events:
         AlertsEvent:
           Type: SNS

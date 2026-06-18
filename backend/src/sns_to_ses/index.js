@@ -1,11 +1,11 @@
-<<<<<<< Updated upstream
-const AWS = require('aws-sdk');
-const ses = new AWS.SES();
-=======
+/**
+ * @fileoverview SNS-to-SES Lambda that delivers formatted weather alert emails to users.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 'use strict';
 
 const { sendWeatherAlertEmail } = require('../lib/email');
->>>>>>> Stashed changes
 
 const SOURCE_EMAIL = process.env.SOURCE_EMAIL;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.SOURCE_EMAIL;
@@ -56,17 +56,6 @@ exports.handler = async (event) => {
       const alert = normalizeAlertPayload(messageObj);
       const toEmail = alert.toEmail || ADMIN_EMAIL;
 
-<<<<<<< Updated upstream
-      await ses.sendEmail({
-        Source: SOURCE_EMAIL,
-        Destination: { ToAddresses: [ADMIN_EMAIL] },
-        Message: {
-          Subject: { Data: subject },
-          Body: { Text: { Data: bodyText } }
-        }
-      }).promise();
-      console.log('Email sent for SNS message');
-=======
       await sendWeatherAlertEmail({
         toEmail,
         tripTitle: alert.tripTitle,
@@ -76,7 +65,6 @@ exports.handler = async (event) => {
         weather: alert.weather,
       });
       console.log(`Weather alert email sent to ${toEmail}`);
->>>>>>> Stashed changes
     } catch (err) {
       console.error('Failed to send email for SNS message', err);
     }

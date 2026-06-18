@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Scheduled Lambda that emails trip reminders before upcoming departures.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 'use strict';
 
 const AWS = require('aws-sdk');

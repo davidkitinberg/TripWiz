@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Sign-in page for the in-app admin portal.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield, Lock } from 'lucide-react';

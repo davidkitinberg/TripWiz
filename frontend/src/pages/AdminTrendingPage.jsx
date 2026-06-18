@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Admin configuration of trending destination cards on the dashboard.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useEffect, useState } from 'react';
 import { Pencil, Plus, Trash2, Save } from 'lucide-react';
 import { api } from '../services/api';

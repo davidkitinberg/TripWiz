@@ -1,3 +1,8 @@
+/**
+ * @fileoverview REST API Lambda handler for trips, admin, places, routes, attachments, and user prefs.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 const AWS = require('aws-sdk');
 const fetch = require('node-fetch');
 

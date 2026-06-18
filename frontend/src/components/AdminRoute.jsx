@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Route guard that restricts pages to authenticated admin users.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useEffect, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { isAuthenticated } from '../services/auth';

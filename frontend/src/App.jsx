@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Root application component with route definitions and authentication guards.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { isAuthenticated } from './services/auth';

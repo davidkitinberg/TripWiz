@@ -1,3 +1,8 @@
+/**
+ * @fileoverview My Trips dashboard for listing, creating, and managing trips.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Pencil, ImageIcon, Trash2, MoreHorizontal, Upload, Plane, Plus, Calendar, LogOut, Settings } from 'lucide-react';

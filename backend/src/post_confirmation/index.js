@@ -1,46 +1,15 @@
+/**
+ * @fileoverview Cognito post-confirmation trigger that seeds default user preferences in DynamoDB.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 'use strict';
 
-<<<<<<< Updated upstream
 const AWS = require('aws-sdk');
 
 const ddb = new AWS.DynamoDB.DocumentClient();
-=======
-const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
-const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const {
-  SESv2Client,
-  CreateEmailIdentityCommand,
-  GetEmailIdentityCommand,
-} = require('@aws-sdk/client-sesv2');
-
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const ses = new SESv2Client({});
->>>>>>> Stashed changes
 
 const TABLE_NAME = process.env.TABLE_NAME;
-
-async function ensureSesIdentity(email) {
-  const address = String(email).trim().toLowerCase();
-  if (!address) return;
-
-  try {
-    const existing = await ses.send(new GetEmailIdentityCommand({ EmailIdentity: address }));
-    if (existing?.VerifiedForSendingStatus === 'SUCCESS') return;
-  } catch (err) {
-    if (err.name !== 'NotFoundException') {
-      console.warn(`SES identity lookup failed for ${address}:`, err.message);
-      return;
-    }
-  }
-
-  try {
-    await ses.send(new CreateEmailIdentityCommand({ EmailIdentity: address }));
-    console.log(`SES identity verification requested for ${address}`);
-  } catch (err) {
-    if (err.name === 'AlreadyExistsException') return;
-    console.warn(`SES identity creation failed for ${address}:`, err.message);
-  }
-}
 
 // [Feature #6][Feature #7][Feature #40] Cognito post-confirmation trigger — give every
 // new user a default PREFS record with trip-reminder emails enabled, so they start
@@ -71,13 +40,7 @@ exports.handler = async (event) => {
           updatedAt:       now,
         },
         ConditionExpression: 'attribute_not_exists(PK)',
-<<<<<<< Updated upstream
       }).promise();
-=======
-      }));
-
-      await ensureSesIdentity(email);
->>>>>>> Stashed changes
     }
   } catch (err) {
     if (err.code !== 'ConditionalCheckFailedException') {
