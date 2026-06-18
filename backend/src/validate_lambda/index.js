@@ -561,6 +561,7 @@ exports.handler = async (event) => {
           await persistWeatherData(trip.tripId, wd.slotId, wd);
           weatherSaved++;
 
+<<<<<<< Updated upstream
           if (wd.isAlert) {
             alertsPublished++;
             await persistAlert(wd, trip.tripId);
@@ -574,6 +575,45 @@ exports.handler = async (event) => {
               const suggestions = await findFallbacks(wd.coords);
               if (suggestions.length > 0) {
                 await persistFallbacks(trip.tripId, wd.slotId, suggestions);
+=======
+            if (wd.isAlert) {
+              await persistAlert(wd, trip.tripId);
+              // [Feature #41] Publish the alert to SNS (fans out to the SES emailer)
+              await sns.send(new PublishCommand({
+                TopicArn: ALERTS_TOPIC_ARN,
+                Message: JSON.stringify({
+                  tripId: trip.tripId,
+                  userId: trip.ownerId,
+                  tripTitle: trip.title || 'Untitled trip',
+                  reason: wd.reason,
+                  slot: {
+                    slotId: wd.slotId,
+                    title: wd.slotTitle,
+                    start: wd.slotStart,
+                    coords: wd.coords,
+                    category: wd.category,
+                  },
+                  weather: {
+                    condition: wd.condition,
+                    description: wd.description,
+                    tempC: wd.tempC,
+                    feelsLikeC: wd.feelsLikeC,
+                    pop: wd.pop,
+                    windSpeedKnots: wd.windSpeedKnots,
+                    windGustsKnots: wd.windGustsKnots,
+                    cloudCoverOktas: wd.cloudCoverOktas,
+                  },
+                }),
+                Subject: `TripWiz weather alert: ${trip.title || trip.tripId}`,
+              }));
+              try {
+                const suggestions = await findFallbacks(wd.coords);
+                if (suggestions.length > 0) {
+                  await persistFallbacks(trip.tripId, wd.slotId, suggestions);
+                }
+              } catch (err) {
+                console.warn('Fallback search failed', { tripId: trip.tripId, slotId: wd.slotId, error: err.message });
+>>>>>>> Stashed changes
               }
             } catch (err) {
               console.warn('Fallback search failed', { tripId: trip.tripId, slotId: wd.slotId, error: err.message });

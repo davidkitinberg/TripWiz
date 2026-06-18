@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { signIn, signUp, confirmSignUp } from '../services/auth';
+import { signIn, signUp, confirmSignUp, resendConfirmationCode } from '../services/auth';
 import { api } from '../services/api';
 
 export default function LoginPage() {
@@ -13,7 +13,9 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
   const [loading, setLoading] = useState(false);
+  const [resending, setResending] = useState(false);
 
   // [Feature #9] If the user arrived from the home search, create their trip on first auth
   async function goAfterAuth() {
@@ -38,6 +40,7 @@ export default function LoginPage() {
   async function handleSignIn(e) {
     e.preventDefault();
     setError('');
+    setInfo('');
     setLoading(true);
     try {
       await signIn(email, password);
@@ -64,9 +67,11 @@ export default function LoginPage() {
   async function handleSignUp(e) {
     e.preventDefault();
     setError('');
+    setInfo('');
     setLoading(true);
     try {
       await signUp(email, password);
+      setInfo(`We sent a verification code to ${email}. Enter it below to activate your account.`);
       setMode('confirm');
     } catch (err) {
       console.error('Sign-up error:', err);
@@ -86,6 +91,7 @@ export default function LoginPage() {
   async function handleConfirm(e) {
     e.preventDefault();
     setError('');
+    setInfo('');
     setLoading(true);
     try {
       await confirmSignUp(email, code);
@@ -99,14 +105,14 @@ export default function LoginPage() {
           // If auto-sign-in fails, just go to sign-in form
         }
       }
-      setError('');
+      setInfo('Email verified. Sign in to continue.');
       setMode('signin');
     } catch (err) {
       console.error('Confirm error:', err);
       if (err.code === 'CodeMismatchException') {
         setError('Incorrect code. Please check your email and try again.');
       } else if (err.code === 'ExpiredCodeException') {
-        setError('Code expired. Please sign up again to receive a new code.');
+        setError('Code expired. Use "Resend code" to get a new one.');
       } else {
         setError(err.message || 'Confirmation failed.');
       }
@@ -115,8 +121,36 @@ export default function LoginPage() {
     }
   }
 
+  async function handleResendCode() {
+    if (!email.trim()) {
+      setError('Enter your email address first.');
+      return;
+    }
+    setError('');
+    setInfo('');
+    setResending(true);
+    try {
+      await resendConfirmationCode(email.trim());
+      setInfo(`A new verification code was sent to ${email.trim()}.`);
+    } catch (err) {
+      console.error('Resend code error:', err);
+      if (err.code === 'InvalidParameterException') {
+        setError('This account is already verified. Sign in instead.');
+        setMode('signin');
+      } else if (err.code === 'UserNotFoundException') {
+        setError('No account found with that email. Create one first.');
+        setMode('signup');
+      } else {
+        setError(err.message || 'Could not resend the code. Please try again.');
+      }
+    } finally {
+      setResending(false);
+    }
+  }
+
   function switchMode(next) {
     setError('');
+    setInfo('');
     setMode(next);
   }
 
@@ -132,6 +166,13 @@ export default function LoginPage() {
         </button>
         <h1>TripWiz</h1>
         <p>Smart travel planning that adapts to reality</p>
+
+        {info && (
+          <div className="success-banner" style={{ marginTop: '0.75rem' }}>
+            <span>{info}</span>
+            <button onClick={() => setInfo('')} style={{ background: 'none', color: 'inherit', padding: '0 0.25rem' }}>×</button>
+          </div>
+        )}
 
         {error && (
           <div className="error-banner" style={{ marginTop: '0.75rem' }}>
@@ -213,7 +254,7 @@ export default function LoginPage() {
             <h2>Verify Your Email</h2>
             <p style={{ marginBottom: '1rem', fontSize: '0.875rem', color: 'var(--gray)' }}>
               We sent a 6-digit code to <strong>{email || 'your email'}</strong>.<br />
-              Check your inbox (and spam folder).
+              Check your inbox (and spam folder), then enter it below.
             </p>
             <label>Verification code</label>
             <input
@@ -229,6 +270,12 @@ export default function LoginPage() {
             <button type="submit" disabled={loading} style={{ width: '100%', padding: '0.65rem', marginTop: '0.25rem' }}>
               {loading ? 'Verifying…' : 'Verify & Continue'}
             </button>
+            <p className="switch-mode">
+              Didn't get the code?{' '}
+              <button type="button" className="link-btn" onClick={handleResendCode} disabled={resending || !email.trim()}>
+                {resending ? 'Sending…' : 'Resend code'}
+              </button>
+            </p>
             <p className="switch-mode">
               <button type="button" className="link-btn" onClick={() => switchMode('signin')}>
                 Back to sign in

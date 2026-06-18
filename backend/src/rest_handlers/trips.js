@@ -451,7 +451,9 @@ async function lookupUserByEmail(email) {
   const attrs = user.Attributes || [];
   const sub = (attrs.find((a) => a.Name === 'sub') || {}).Value;
   const userEmail = (attrs.find((a) => a.Name === 'email') || {}).Value;
-  return sub ? { userId: sub, email: (userEmail || email).toLowerCase() } : null;
+  const emailVerified = (attrs.find((a) => a.Name === 'email_verified') || {}).Value === 'true';
+  const confirmed = user.UserStatus === 'CONFIRMED' || emailVerified;
+  return sub ? { userId: sub, email: (userEmail || email).toLowerCase(), emailVerified: confirmed } : null;
 }
 
 function formatTripDate(iso) {
@@ -1197,6 +1199,9 @@ exports.handler = async (event) => {
 
       const invited = await lookupUserByEmail(email);
       if (!invited) return fail(404, 'USER_NOT_FOUND', 'No TripWiz account exists for that email');
+      if (!invited.emailVerified) {
+        return fail(400, 'EMAIL_NOT_VERIFIED', 'This user has not verified their email yet. Ask them to confirm their TripWiz account first.');
+      }
       if (invited.userId === userId) {
         return fail(400, 'CANNOT_INVITE_SELF', 'You are already the owner of this trip');
       }

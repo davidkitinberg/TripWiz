@@ -33,6 +33,17 @@ export function confirmSignUp(email, code) {
   });
 }
 
+// Resend the sign-up verification code (Cognito sends via SES when the pool is configured)
+export function resendConfirmationCode(email) {
+  return new Promise((resolve, reject) => {
+    const user = new CognitoUser({ Username: email, Pool: pool });
+    user.resendConfirmationCode((err, result) => {
+      if (err) reject(err);
+      else resolve(result);
+    });
+  });
+}
+
 // [Feature #3] User Sign-In via Cognito SRP (password never sent in plaintext)
 export function signIn(email, password) {
   return new Promise((resolve, reject) => {

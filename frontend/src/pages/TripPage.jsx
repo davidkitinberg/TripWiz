@@ -933,7 +933,11 @@ export default function TripPage() {
       setCollaborators((prev) => [...prev, res.collaborator]);
       setInviteEmail('');
     } catch (err) {
-      setInviteError(err.message || 'Invite failed');
+      if (err.code === 'EMAIL_NOT_VERIFIED') {
+        setInviteError('That user has not verified their email yet. Ask them to confirm their TripWiz account first.');
+      } else {
+        setInviteError(err.message || 'Invite failed');
+      }
     } finally {
       setInviting(false);
     }

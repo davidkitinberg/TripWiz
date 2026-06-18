@@ -278,11 +278,34 @@ export default function TripsPage() {
     if (!renamingTrip || !renameDraft.trim()) return;
     setRenaming(true);
     try {
-      await api.updateTrip(renamingTrip.tripId, { title: renameDraft.trim() });
-      setTrips((prev) => prev.map((t) => t.tripId === renamingTrip.tripId ? { ...t, title: renameDraft.trim() } : t));
+      let version = renamingTrip.version;
+      if (!version) {
+        const full = await api.getTrip(renamingTrip.tripId);
+        version = full.trip?.version || 1;
+      }
+      const res = await api.updateTrip(renamingTrip.tripId, {
+        title: renameDraft.trim(),
+        version,
+      });
+      const updated = res.trip || {};
+      setTrips((prev) => prev.map((t) => (
+        t.tripId === renamingTrip.tripId
+          ? { ...t, title: updated.title || renameDraft.trim(), version: updated.version ?? version + 1 }
+          : t
+      )));
       setRenamingTrip(null);
-    } catch (err) { setError(err.message); }
-    finally { setRenaming(false); }
+    } catch (err) {
+      if (err.code === 'VERSION_CONFLICT') {
+        setError('This trip was updated elsewhere. Refreshing your list…');
+        const res = await api.getTrips();
+        setTrips(res.items || []);
+        setRenamingTrip(null);
+      } else {
+        setError(err.message);
+      }
+    } finally {
+      setRenaming(false);
+    }
   }
 
   function handleImageFile(tripId, file) {
