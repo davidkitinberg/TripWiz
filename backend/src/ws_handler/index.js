@@ -1,3 +1,8 @@
+/**
+ * @fileoverview WebSocket Lambda handler for real-time trip join, edit, cursor, and presence.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 const AWS = require('aws-sdk');
 
 const dynamodb = new AWS.DynamoDB.DocumentClient();

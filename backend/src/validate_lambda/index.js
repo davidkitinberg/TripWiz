@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Weather validation Lambda: nightly checks, alerts, and fallback venue discovery.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 'use strict';
 
 const AWS = require('aws-sdk');
@@ -679,8 +684,30 @@ exports.handler = async (event) => {
             // [Feature #41] Publish the alert to SNS (fans out to the SES emailer)
             await sns.publish({
               TopicArn: ALERTS_TOPIC_ARN,
-              Message:  JSON.stringify(wd),
-              Subject:  `TripWiz alert for ${trip.title || trip.tripId}`
+              Message: JSON.stringify({
+                tripId: trip.tripId,
+                userId: trip.ownerId,
+                tripTitle: trip.title || 'Untitled trip',
+                reason: wd.reason,
+                slot: {
+                  slotId: wd.slotId,
+                  title: wd.slotTitle,
+                  start: wd.slotStart,
+                  coords: wd.coords,
+                  category: wd.category,
+                },
+                weather: {
+                  condition: wd.condition,
+                  description: wd.description,
+                  tempC: wd.tempC,
+                  feelsLikeC: wd.feelsLikeC,
+                  pop: wd.pop,
+                  windSpeedKnots: wd.windSpeedKnots,
+                  windGustsKnots: wd.windGustsKnots,
+                  cloudCoverOktas: wd.cloudCoverOktas,
+                },
+              }),
+              Subject: `TripWiz weather alert: ${trip.title || trip.tripId}`,
             }).promise();
             try {
               const suggestions = await findFallbacks(wd.coords);

@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Shared sidebar layout for admin portal pages.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Users, Map, Settings, LogOut, Shield } from 'lucide-react';

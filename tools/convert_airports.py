@@ -1,3 +1,8 @@
+"""
+@authors David Kitinberg, Amit Bitton, Sagi Hassid
+Purpose: Converts airport CSV data into JSON for frontend flight autocomplete.
+"""
+
 import csv
 import json
 import os

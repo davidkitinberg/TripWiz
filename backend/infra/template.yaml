@@ -631,12 +631,14 @@ Resources:
         Variables:
           SOURCE_EMAIL: !Ref SourceEmail
           ADMIN_EMAIL: !Ref AdminEmail
+          FRONTEND_URL: !Ref FrontendUrl
       Policies:
         - Statement:
-            Effect: Allow
-            Action:
-              - ses:SendEmail
-            Resource: '*'
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*"
       Events:
         AlertsEvent:
           Type: SNS
@@ -656,6 +658,12 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TripWizTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:CreateEmailIdentity
+                - ses:GetEmailIdentity
+              Resource: '*'
 
   PostConfirmationInvokePermission:
     Type: AWS::Lambda::Permission
@@ -671,6 +679,19 @@ Resources:
       UserPoolName: TripWizUserPool
       AutoVerifiedAttributes:
         - email
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+        EmailSubject: 'Verify your TripWiz account'
+        EmailMessage: 'Welcome to TripWiz! Your verification code is {####}. Enter it in the app to activate your account and receive trip emails.'
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
       LambdaConfig:
         PostConfirmation: !GetAtt PostConfirmationFunction.Arn
 

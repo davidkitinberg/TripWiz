@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Access denied page shown to non-admin users.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ShieldAlert } from 'lucide-react';

@@ -1,3 +1,8 @@
+/**
+ * @fileoverview HTTP client for the TripWiz REST API with Cognito JWT authorization.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import config from '../config';
 import { getIdToken } from './auth';
 

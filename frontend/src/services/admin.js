@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Admin access checks via Cognito Admins group and bootstrap email whitelist.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import { getIdToken } from './auth';
 
 // Bootstrap whitelist — must mirror backend ADMIN_EMAILS env var.

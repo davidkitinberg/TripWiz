@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Account settings for profile, regional preferences, and notifications.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
