@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Admin user management: list, suspend, promote, and delete users.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useEffect, useRef, useState } from 'react';
 import { MoreVertical, ShieldCheck, ShieldOff, UserX, UserCheck, Trash2, Eye } from 'lucide-react';
 import { api } from '../services/api';

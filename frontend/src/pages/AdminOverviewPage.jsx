@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Admin portal overview with platform usage metrics.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useEffect, useState, useMemo } from 'react';
 import { Users, Map, Plane, UserPlus, FileText, TrendingUp, Activity } from 'lucide-react';
 import { api } from '../services/api';

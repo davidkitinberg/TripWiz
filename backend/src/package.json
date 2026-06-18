@@ -6,6 +6,7 @@
     "test": "jest --runInBand"
   },
   "dependencies": {
+    "@aws-sdk/client-ses": "^3",
     "aws-sdk": "^2.1693.0",
     "node-fetch": "^2.6.7"
   },

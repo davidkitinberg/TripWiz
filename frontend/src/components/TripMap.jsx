@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Leaflet map component displaying trip stops and route polylines.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useEffect, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';

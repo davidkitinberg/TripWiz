@@ -1,3 +1,8 @@
+/**
+ * @fileoverview WebSocket client for real-time collaborative trip editing.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import config from '../config';
 import { getAccessToken } from './auth';
 

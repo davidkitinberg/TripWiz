@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Trip overview hub: logistics sections, attachments, weather, and export.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../services/api';

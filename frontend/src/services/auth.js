@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Amazon Cognito authentication: sign-up, sign-in, tokens, and session handling.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 import {
   CognitoUserPool,
   CognitoUser,
@@ -27,6 +32,17 @@ export function confirmSignUp(email, code) {
   return new Promise((resolve, reject) => {
     const user = new CognitoUser({ Username: email, Pool: pool });
     user.confirmRegistration(code, true, (err, result) => {
+      if (err) reject(err);
+      else resolve(result);
+    });
+  });
+}
+
+// Resend the sign-up verification code (Cognito sends via SES when the pool is configured)
+export function resendConfirmationCode(email) {
+  return new Promise((resolve, reject) => {
+    const user = new CognitoUser({ Username: email, Pool: pool });
+    user.resendConfirmationCode((err, result) => {
       if (err) reject(err);
       else resolve(result);
     });

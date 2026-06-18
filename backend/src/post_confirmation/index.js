@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Cognito post-confirmation trigger that seeds default user preferences in DynamoDB.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 'use strict';
 
 const AWS = require('aws-sdk');

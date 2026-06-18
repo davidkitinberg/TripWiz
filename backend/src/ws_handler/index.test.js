@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Unit tests for the WebSocket collaboration handler.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 function promiseResult(value) {
   return { promise: jest.fn().mockResolvedValue(value) };
 }

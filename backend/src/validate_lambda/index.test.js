@@ -1,3 +1,8 @@
+/**
+ * @fileoverview Unit tests for the weather validation Lambda.
+ * @authors David Kitinberg, Amit Bitton, Sagi Hassid
+ */
+
 function loadHandler({ ddb, sns, secrets, fetchImpl }) {
   jest.resetModules();
   jest.doMock('aws-sdk', () => ({
