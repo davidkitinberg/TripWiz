@@ -1,4 +1,4 @@
-# TripWiz
+# TripWiz ✈️
 
 TripWiz is a serverless travel planning platform that helps users create, organize, validate, and share complete trip plans. It combines itinerary planning, interactive maps, weather-aware recommendations, travel logistics, document storage, collaboration, and admin tools in one web application.
 
