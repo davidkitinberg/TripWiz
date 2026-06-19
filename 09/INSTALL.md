@@ -2,9 +2,14 @@
 
 **Team:** TripWiz — Ariel University · David Kitinberg, Amit Bitton, Sagi Hassid
 
-This folder contains two automated entry points that take a clean AWS account from
+This folder contains three automated entry points that take a clean AWS account from
 zero to a fully running TripWiz deployment (backend + frontend):
 
+* **[`extract-source.sh`](extract-source.sh)** — only needed if you received this
+  project as the 12 numbered deliverable folders (`01/`–`12/`) plus
+  `09/TripWiz-source.zip`, rather than as a full `git clone`. Extracts the zip into
+  the repo root so `backend/`, `frontend/`, and `tools/` exist as siblings of `09/`.
+  A no-op if they're already there.
 * **[`setup.sh`](setup.sh)** — prepares the local machine: installs/checks all
   required tooling. Touches nothing in AWS.
 * **[`deploy.sh`](deploy.sh)** — does the actual work: configures AWS credentials,
@@ -20,9 +25,9 @@ environment setup.
 ## 1. What you need before you start
 
 * A **bash shell** — Linux, macOS, Windows Subsystem for Linux (WSL), or Git Bash on
-  Windows. Both scripts are plain Bash and do not depend on any particular OS package
-  manager (they will try to auto-install missing tools, but fall back to clear manual
-  instructions if they can't).
+  Windows. All three scripts are plain Bash and do not depend on any particular OS
+  package manager (they will try to auto-install missing tools, but fall back to clear
+  manual instructions if they can't).
 * An **AWS account** with permissions to create the full set of resources declared in
   [`backend/infra/template.yaml`](../backend/infra/template.yaml) (IAM, Lambda, API
   Gateway, DynamoDB, Cognito, S3, Bedrock, Location Service, SES, SNS, EventBridge,
@@ -34,11 +39,16 @@ environment setup.
 
 ---
 
-## 2. Running it — two steps
+## 2. Running it — three steps
 
 From the repository root:
 
 ```bash
+# Only if you have 01/-12/ + 09/TripWiz-source.zip instead of a git clone —
+# a no-op otherwise:
+chmod +x 09/extract-source.sh
+./09/extract-source.sh
+
 # One-time: install/verify all required local tooling
 chmod +x 09/setup.sh
 ./09/setup.sh
@@ -48,13 +58,36 @@ chmod +x 09/deploy.sh
 ./09/deploy.sh
 ```
 
-Both scripts resolve all paths relative to their own location, so they can be run from
-any working directory. `deploy.sh` refuses to start if any required tool is missing —
-run `setup.sh` first.
+All three scripts resolve all paths relative to their own location, so they can be run
+from any working directory. `deploy.sh` refuses to start if any required tool is
+missing — run `setup.sh` first; `setup.sh` and `deploy.sh` both assume `backend/` and
+`frontend/` already exist at the repo root — run `extract-source.sh` first if they
+don't.
 
 ---
 
-## 3. `setup.sh` — environment preparation
+## 3. `extract-source.sh` — recovering a full source tree
+
+Only needed if this project reached you as the 12 numbered deliverable folders
+(`01/`–`12/`) plus `09/TripWiz-source.zip`, rather than as a `git clone`. Both
+`setup.sh` and `deploy.sh` resolve `backend/` and `frontend/` as siblings of `09/` —
+this script puts them there:
+
+1. If `backend/` and `frontend/` already exist at the repo root, it does nothing and
+   exits successfully (safe to run on a full clone too).
+2. Otherwise, it extracts `09/TripWiz-source.zip` directly into the repo root —
+   the same directory that holds `01/`–`12/` — recreating `README.md`, `frontend/`,
+   `backend/`, and `tools/` there.
+3. It verifies `backend/infra/template.yaml` and `frontend/package.json` exist
+   afterwards, so a corrupt or partial zip is caught immediately instead of failing
+   confusingly later inside `deploy.sh`.
+
+It uses the system `unzip` where available, or the `tar.exe` (bsdtar) bundled with
+Windows 10 1803+ / 11 otherwise — no extra tools to install.
+
+---
+
+## 4. `setup.sh` — environment preparation
 
 Installs/checks for everything the deployment needs, and **makes no AWS calls**:
 
@@ -71,7 +104,7 @@ your `PATH`.
 
 ---
 
-## 4. `deploy.sh` — build & deploy
+## 5. `deploy.sh` — build & deploy
 
 Performs the actual deployment, in order:
 
@@ -84,9 +117,9 @@ Performs the actual deployment, in order:
 | **5. Frontend build** | Runs `npm ci` and `npm run build` inside `frontend/`, producing the production bundle in `frontend/dist`. |
 | **6. Frontend deploy** | Creates (or reuses) an AWS Amplify Hosting app and a `main` branch, zips `frontend/dist`, uploads it through Amplify's manual-deployment API, starts the deployment, polls until it succeeds, and prints the live `https://main.<app-id>.amplifyapp.com` URL (also saved to `09/last-deployment-url.txt`). |
 
-Both scripts print clearly-labelled `[INFO]` / `[ OK ]` / `[WARN]` / `[FAIL]` messages
-and stop immediately (via `set -euo pipefail` and an error trap) on the first command
-that fails, so you always know exactly which step needs attention.
+All three scripts print clearly-labelled `[INFO]` / `[ OK ]` / `[WARN]` / `[FAIL]`
+messages and stop immediately (via `set -euo pipefail` and an error trap) on the first
+command that fails, so you always know exactly which step needs attention.
 
 > **Why Amplify and not an S3/CloudFront upload?** TripWiz's frontend is hosted on
 > **AWS Amplify Hosting** (see [`frontend/amplify.yml`](../frontend/amplify.yml) and
@@ -97,7 +130,7 @@ that fails, so you always know exactly which step needs attention.
 
 ---
 
-## 5. Steps that AWS requires a human to complete
+## 6. Steps that AWS requires a human to complete
 
 A few actions inherently require a person to click a link or approve a request — they
 cannot be scripted on a brand-new account, and `deploy.sh` prints a reminder for each
@@ -125,10 +158,11 @@ Manual), Sections 6.1, 7.1, 7.2, and 8.
 
 ---
 
-## 6. Re-running the scripts
+## 7. Re-running the scripts
 
-Both scripts are **idempotent**:
+All three scripts are **idempotent**:
 
+* Re-running `extract-source.sh` does nothing once `backend/` and `frontend/` exist.
 * Re-running `setup.sh` simply re-checks tooling and skips anything already installed.
 * Re-running `deploy.sh` will skip credential setup (already verified), run
   `sam deploy` non-interactively using the saved `samconfig.toml`, regenerate
