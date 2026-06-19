@@ -120,7 +120,7 @@ at the end of its run:
    route-optimization feature fails with an access-denied error.
 
 Full operational detail on each of these (including which console page to use and what
-to check) is documented in **[`11.md`](../11.md)** (Folder 11 — System Administrator
+to check) is documented in **[`11.md`](../11/11.md)** (Folder 11 — System Administrator
 Manual), Sections 6.1, 7.1, 7.2, and 8.
 
 ---

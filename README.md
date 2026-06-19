@@ -203,9 +203,9 @@ The backend uses a single DynamoDB table with partition and sort keys. It stores
 ```text
 TripWiz/
 |-- README.md
-|-- README_DRAFT2.md
-|-- README_draft.md
-|-- WEATHER_LOGIC_DOCUMENTATION.md
+|-- 01/ .. 08/, 11/, 12/   -- each holds Nx.md and its Nx.pdf (project deliverables)
+|-- 09/                    -- setup/deploy scripts + TripWiz-source.zip (full source snapshot)
+|-- 10/                    -- deployed system link + demo credentials
 |-- backend/
 |   |-- README.md
 |   |-- api/

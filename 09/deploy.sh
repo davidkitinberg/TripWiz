@@ -390,7 +390,7 @@ print_post_deploy_reminders() {
      In the Amazon Bedrock console → Model access, enable Anthropic Claude Haiku 4.5 —
      the AI route-optimization feature will fail with an access-denied error otherwise.
 
-  Full background on each of these is in 09/INSTALL.md and in 11.md
+  Full background on each of these is in 09/INSTALL.md and in 11/11.md
   (Folder 11 — System Administrator Manual).
 
 EOF
